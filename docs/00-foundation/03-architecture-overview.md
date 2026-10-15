@@ -55,7 +55,7 @@ flowchart TB
     subgraph DP["Data plane — customer's cloud (row data stays here)"]
         WP[Write proxy<br/>Rust, pgwire, tokio]
         CE[Changeset engine<br/>Rust + DuckDB]
-        OS[(Overlay store<br/>Parquet on object storage)]
+        OS[(Overlay store<br/>local WAL for durability,<br/>Parquet on object storage at rest)]
         CL[(Compensation log)]
         RS[(Routing store<br/>durable, data-plane owned)]
         AD[Adapters<br/>Java, Connector interface]
@@ -82,9 +82,9 @@ flowchart TB
     CE --> OS
     CE --> AD
     AD --> TGT
-    AD --> CL
+    CE --> CL
 
-    BC <-->|"heartbeat ~30s + jitter<br/>metadata only"| WP
+    BC <-->|"heartbeat ~30s + jitter<br/>metadata only"| CE
     CE -->|summary + impact<br/>never row delta| API
     API -->|policy versions, routing,<br/>merge / revert instructions| RS
 ```
@@ -99,7 +99,7 @@ Each subsection says the language, what the component owns, and what it must nev
 Owns the REST and gRPC surface agents and SDKs call for non-query operations: create branch, attach rationale, propose, fetch verdict, list changesets. Authenticates principals. Never touches row data and never sits on the query path; an agent that only reads and writes through its connection string need not call the API until it proposes.
 
 ### Branch coordinator (control plane, Elixir) — doc 07
-One supervised GenServer per `open` or `proposed` branch. Owns lifecycle transitions, schedules the heartbeat as a periodic self-message, and reconciles the data plane's reported state with Postgres. Process state is a cache of Postgres state and never holds anything that must survive a restart (doc 18 §2). Never calls a remote system while holding an Ecto transaction.
+One supervised GenServer per non-terminal branch (`open`, `proposed`, `merging`). Owns lifecycle transitions, schedules the heartbeat as a periodic self-message, and reconciles the data plane's reported state with Postgres. Process state is a cache of Postgres state and never holds anything that must survive a restart (doc 18 §2). Never calls a remote system while holding an Ecto transaction.
 
 ### Policy engine (control plane, Elixir) — doc 06
 Owns policy storage, versioning, orchestration of evaluation, and the verdict. A policy is a YAML envelope (scope, outcome, version) around SQL assertions. The SQL assertions **must** execute in the data plane, run by the changeset engine against the changeset's row delta, summary, and impact layers, because the row delta never crosses the boundary; the data plane returns only each assertion's result (pass/fail and a count) to the control plane, which combines them into exactly one verdict per changeset. This split keeps doc 02's rule that policies are "SQL against the row delta and summary" while keeping row data local. The policy engine never reads evidence (doc 02: evidence is for humans) and never receives row data.
@@ -114,13 +114,13 @@ The source of truth for every doc 02 entity, plus the deltas and totals tables f
 Owns every piece of control-plane work that must complete: changeset evaluation requests, counter drains, billing rollups, policy re-evaluation after a policy edit, heartbeat-triggered repairs. Fan-out to NATS JetStream is deferred until a job needs more than one consumer. Never used for anything the proxy waits on.
 
 ### Write proxy (data plane, Rust) — doc 04
-The component agents connect to. Speaks the Postgres wire protocol via pgwire (and a REST shim for CRM targets), resolves the branch for a connection from the routing store, routes reads to the base snapshot and writes to the overlay, and records evidence. Owns the routing store. Must answer every query from local state and never calls the control plane synchronously.
+The component agents connect to. Speaks the Postgres wire protocol via pgwire (and a REST shim for CRM targets), resolves the branch for a connection from the routing store, routes reads to the base snapshot and writes to the overlay, and records evidence. Owns the routing store. Must answer every query from local state and never calls the control plane synchronously. Never holds primary target credentials; for pass-through reads it uses an ephemeral, read-only, snapshot-scoped credential minted by the adapter (doc 08). Reports its per-branch facts (overlay size, freeze acknowledged, evidence gap) to the changeset engine over the local socket; the engine sends the heartbeat.
 
 ### Changeset engine (data plane, Rust + DuckDB) — doc 05
-Computes the row delta, summary, and impact layers from an overlay and a base snapshot, and runs impact queries. Returns summary and impact to the control plane; serves the row delta on demand inside the data plane. Never ships row data across the boundary. In-process versus sidecar is open (§11).
+Computes the row delta, summary, and impact layers from an overlay and a base snapshot, and runs impact queries. Returns summary and impact to the control plane; serves the row delta on demand inside the data plane. Never ships row data across the boundary. Runs as a separate data-plane process (`steward-engine`) that also contains the merge worker and the compensation-log module and sends the per-branch heartbeat (decided; see doc 05 §5.1).
 
-### Overlay store (data plane, Parquet on the customer's object storage) — doc 05
-Holds each branch's writes since its base snapshot; the only thing a branch owns. Retained after merge for audit with a per-target retention window. Never readable by the control plane.
+### Overlay store (data plane; local WAL for durability, Parquet on the customer's object storage at rest) — doc 05
+Holds each branch's writes since its base snapshot; the only thing a branch owns. The durable per-write checkpoint is a local fsync'd WAL; Parquet on object storage is the at-rest form, rolled asynchronously. Retained after merge for audit with a per-target retention window. Never readable by the control plane.
 
 ### Compensation log (data plane) — doc 09
 Append-only record, per merge, of the row-level inverse computed at merge time. Written before a merge is considered complete; that write is the merge's checkpoint. Never consulted by policy: a revert is a new changeset that goes through policy like any other.
@@ -129,7 +129,7 @@ Append-only record, per merge, of the row-level inverse computed at merge time. 
 What the proxy needs per query: branch → base snapshot reference and overlay path, branch state, current policy version, credential references. Populated and corrected by heartbeat. Durable, not a cache: it survives restarts and is never purged wholesale. Never treated as source of truth by the control plane.
 
 ### Adapters (data plane, Java, `Connector` interface) — doc 08
-One per target kind: JDBC for Postgres and MySQL, an Iceberg reference implementation, Snowflake, Salesforce. An adapter reads a base snapshot, applies a row delta, and produces inverses. Adapters are the only code that varies by backend and the only code that holds target credentials. They never contain policy, lifecycle, or routing logic.
+One per target kind: JDBC for Postgres and MySQL, an Iceberg reference implementation, Snowflake, Salesforce. An adapter reads a base snapshot and applies a row delta. Adapters are the only code that varies by backend and the only code that holds primary target credentials. They never contain policy, lifecycle, or routing logic.
 
 ### Target (customer's system) — doc 08
 Registered once; never owned. Steward never becomes the system of record (doc 01 §6).
@@ -152,7 +152,7 @@ Each flow names its checkpoint. The state machine, conflict rules, and failure m
 
 **Create branch.** The agent (or SDK) calls the API; the branch coordinator writes the `open` branch row to Postgres, which is the checkpoint. The coordinator then asks the data plane, by immediate push or next heartbeat, to realise the base snapshot through the adapter and register the branch in the routing store. If the agent connects before that lands, the proxy refuses with a retryable error rather than guessing.
 
-**Write and evidence capture.** The proxy resolves the branch from the routing store, serves reads from the base snapshot shadowed by the branch's own writes, and appends writes to the overlay as Parquet; the durable overlay append is the checkpoint. Evidence (queries, tables touched) is recorded alongside; rationale supplied through the SDK goes to the API as metadata.
+**Write and evidence capture.** The proxy resolves the branch from the routing store, serves reads from the base snapshot shadowed by the branch's own writes, and appends writes to the overlay's local fsync'd WAL (rolled asynchronously to Parquet on object storage); the durable WAL append is the checkpoint. Evidence (queries, tables touched) is recorded alongside; rationale supplied through the SDK goes to the API as metadata.
 
 **Propose.** The coordinator moves the branch to `proposed` in Postgres (checkpoint) and enqueues a changeset computation. The changeset engine computes the three layers in the data plane, runs the current policy version's SQL assertions locally, and returns summary, impact, and per-assertion results; the policy engine combines the results into one verdict. A later write on the branch produces a new changeset and supersedes the old one.
 
@@ -174,7 +174,7 @@ These are adapted from Cloudflare's D1 control-plane write-up (blog.cloudflare.c
 4. **Heartbeats are the reconciliation mechanism.** Each branch is an Elixir GenServer whose heartbeat is a periodic self-message with jitter. The data plane sends its state, the coordinator sends back the authoritative state, the data plane corrects itself. There is no separate repair job; the heartbeat is that job, and it runs whether or not anything failed.
 5. **Checkpoints, not distributed transactions.** Every flow in §6 names the one write after which it has happened. Nothing holds an Ecto transaction open while calling the data plane, an adapter, or a billing system. Steps after the checkpoint are best-effort and repaired by principle 4.
 6. **Pre-aggregate with a change log.** Per-customer counters (open branches, pending reviews, metered reviewed changesets) are rows in a deltas table, drained by an Oban job into a totals table that the queue header and the billing meter read. Never a `SUM` over all rows at read time; never a contended increment on one row per customer.
-7. **Right store per job.** Postgres for transactional metadata; a columnar store (ClickHouse or DuckDB over Parquet, open) for analytics and billing events; the data-plane routing store for routing; Parquet on object storage for overlays. Nothing goes into Postgres only because it is already there.
+7. **Right store per job.** Postgres for transactional metadata; a columnar store (ClickHouse or DuckDB over Parquet, open) for analytics and billing events; the data-plane routing store for routing; a local WAL for overlay durability with Parquet on object storage at rest. Nothing goes into Postgres only because it is already there.
 8. **Eventual consistency and queues where strong consistency is not needed.** Analytics, billing, policy re-evaluation, and overlay cleanup go through Oban and later NATS JetStream. The control plane's view of a branch may lag by one heartbeat interval, and the UI says "as of" rather than pretending otherwise. Only the checkpoint writes of §6 are strongly consistent.
 9. **Load-test with realistic agent write patterns before optimising.** Agents write in bursts: hundreds of small `UPDATE`s in a loop, or one large `INSERT ... SELECT`, interleaved with heavy reads. `tools/fixtures` must generate these patterns and doc 17 must run them against the proxy before any hot-path optimisation is accepted.
 
@@ -184,8 +184,8 @@ These are adapted from Cloudflare's D1 control-plane write-up (blog.cloudflare.c
 
 | Boundary | Mechanism | Why |
 |---|---|---|
-| Elixir ↔ changeset engine (Rust) in the control plane, if any in-process use is needed (e.g. policy tests against fixture changesets) | Rustler NIF | Avoids a process hop for small, frequent calls; must be a dirty NIF or run on a dedicated scheduler so DuckDB never blocks the BEAM |
-| Write proxy (Rust) ↔ changeset engine (Rust) | In-process crate dependency, or a separate binary over a local Unix socket | Same language; the choice is isolation versus latency (§11) |
+| Elixir ↔ changeset engine (Rust) in the control plane | Rustler NIF, used ONLY for policy SQL static validation and policy tests against fixture changesets | Avoids a process hop for small, frequent calls; must be a dirty NIF or run on a dedicated scheduler so DuckDB never blocks the BEAM. Changeset computation never runs in the control plane |
+| Write proxy (Rust) ↔ changeset engine (Rust) | Separate data-plane process (`steward-engine`) over gRPC on a local Unix socket; the shared `steward-overlay` crate is linked into both for the overlay WAL and `view()` | Same language; isolation of DuckDB memory from the hot path (decided; doc 05 §5.1) |
 | Control plane ↔ data plane | HTTPS with mTLS; gRPC for the heartbeat and streaming changeset results, REST for the agent-facing API | Crosses the trust boundary, so it must be an explicit wire contract that can be audited for what it carries (doc 15) |
 | Write proxy (Rust) ↔ adapters (Java) | gRPC over a local socket; the adapter host is a thin JVM process | Keeps JVM startup and heap out of the proxy's latency path; adapters are libraries with no framework (doc 18 §2) |
 | Agents ↔ write proxy | Postgres wire protocol (pgwire) or the target's REST shape | Agents do not change (doc 01 §3) |
@@ -222,7 +222,7 @@ All protobuf and OpenAPI definitions live in `contracts/` and are the only thing
 |---|---|---|
 | Postgres branching substrate for M0: Neon open-source storage, Ardent, or Xata. Criteria: self-hostable in the customer's account under our Helm chart, snapshot creation latency, licence | Architecture | Doc 04 and doc 08, before M0 |
 | Analytics and billing store: ClickHouse (separate service to operate) or DuckDB over Parquet (no new service, weaker concurrency) | Architecture | Doc 12 |
-| Does the changeset engine run in-process with the write proxy (lowest latency, shared failure domain) or as a sidecar binary (DuckDB memory isolated from the hot path)? | Proxy lead | Doc 05 |
+| Does the changeset engine run in-process with the write proxy or as a sidecar binary? Decided: separate process; see doc 05 §5.1 | Proxy lead | Doc 05 |
 | Multi-region data planes for one customer: supported at M0, or one region per customer with multi-region deferred until a customer's targets span regions? | Founding team | Doc 14 |
 | Which embedded store backs the routing store (RocksDB, sled, or SQLite in WAL mode) | Proxy lead | Doc 04 |
 | How evidence metadata is scrubbed so query text never carries row values across the boundary | Architecture | Doc 15 |
