@@ -305,7 +305,7 @@ Metrics (OpenTelemetry, exported from the host; all labelled by `target_kind`, `
 
 - `adapter_call_duration_seconds{op}` histogram per `Connector` method.
 - `adapter_errors_total{op, code}`.
-- `adapter_apply_rows_total{merge_id, outcome=confirmed|failed|skipped}` and `adapter_apply_in_progress{merge_id}` gauge, which is what the heartbeat's `merge_progress` is read from.
+- `adapter_apply_rows_total{outcome=confirmed|failed|skipped}` and `adapter_apply_in_progress` gauge (per `target_id`, never labelled by `merge_id`, doc 16; the per-merge figure is in logs/traces and is what the heartbeat's `merge_progress` is read from).
 - `adapter_pool_active`, `adapter_pool_wait_seconds` (HikariCP metrics bridged).
 - `adapter_snapshots_open` gauge; `adapter_snapshot_lost_total`.
 - `adapter_quota_remaining{target_id}` (Salesforce `Sforce-Limit-Info` header, refreshed on every call) and `adapter_quota_reset_seconds`.

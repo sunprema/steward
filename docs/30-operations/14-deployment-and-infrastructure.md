@@ -76,7 +76,6 @@ enrolment:
 identity:
   certSecretRef: steward/data-plane-identity   # mTLS client cert + key, written at enrolment
   exportKeySecretRef: steward/export-signing-key   # Ed25519 (doc 09 §3.2)
-  apiKeySaltSecretRef: steward/api-key-salt       # doc 12 §8.6
 objectStore:
   bucket: ""
   prefix: steward/                   # doc 12 §8.1
@@ -190,7 +189,6 @@ The pgwire listener shares the NLB (listener 5432) because agents run in the cus
 | Target credentials (`credential_ref` = `aws-sm://…`, doc 08 §5.5) | Customer's Secrets Manager | `steward-adapters` only | Customer rotates; watcher polls every 60 s, drains old pool over 30 s | 30 s |
 | Data-plane identity (mTLS client cert + key, SAN = `data_plane_id`) | Secrets Manager `steward/data-plane-identity`, mounted via the Secrets Store CSI driver | `steward-engine` | Issued at enrolment for 90 days; the engine requests renewal at 60 days over the existing stream (`RenewIdentity`, New in `contracts/`); the old cert stays valid until expiry | 30 days |
 | Export signing key (Ed25519, doc 09 §3.2) | Secrets Manager `steward/export-signing-key` | `steward-engine` | Generated at enrolment; rotation registers a new public key and the control plane keeps every old public key so earlier manifests still verify | Indefinite for verification |
-| API-key salt (doc 12 §8.6) | Secrets Manager `steward/api-key-salt` | `steward-proxy` | Never rotated in place: a new salt requires a full `RoutingUpsert` re-provisioning of key hashes, which the control plane performs on request | — |
 | Proxy and grant server TLS certs | Customer's choice (ACM PCA or cert-manager) | proxy, engine | cert-manager renews; hot reload on file change | Per issuer |
 | Grant signing key (ES256, doc 07 §5.6) | Control plane, AWS KMS asymmetric key per region, signing via KMS so the private key is never in a pod | `steward-control` | Every 90 days; the new public key is pushed to data planes on the stream (`RoutingUpsert`-adjacent `PublicKeys` instruction, New) and both keys are accepted for 24 h (doc 07 §5.6) | 24 h |
 | Data-plane CA (issues identity certs) | Control plane, AWS Private CA per region | enrolment service | 5-year root, 1-year intermediate | Standard chain |

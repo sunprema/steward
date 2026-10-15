@@ -25,7 +25,7 @@ stateDiagram-v2
     proposed --> abandoned : abandon / held-TTL expiry
     merging --> merged : merge applied
     merging --> proposed : merge failed before compensation checkpoint
-    merging --> abandoned : base snapshot lost (snapshot_lost)
+    merging --> abandoned : base snapshot lost (snapshot_lost) / overlay lost (overlay_lost)
     merged --> closed : retention window elapsed
     rejected --> closed : retention window elapsed
     abandoned --> closed : retention window elapsed
@@ -60,9 +60,10 @@ Every transition is initiated by the control plane writing the new state to the 
 | `merging` → `merged` | Data plane reports merge `applied` | Merge row `pending`; compensation record persisted; every row confirmed by adapter | Merge row `applied`; target lease released; routing entry removed | Control plane, on report from data plane |
 | `merging` → `proposed` | Merge fails before compensation is persisted (`stale_base`, adapter unreachable past retry budget) | Merge row `pending`, no compensation persisted | Merge row `failed`; target lease released; for `stale_base`, new changeset computed showing conflict rows | Control plane |
 | `open`/`proposed`/`merging` → `abandoned` | Base snapshot lost (adapter `SNAPSHOT_LOST`, reported by heartbeat or by a failed compute/merge step) | Branch non-terminal; for `merging`, compensation not yet persisted | Reason `snapshot_lost`; merge row (if any) `failed`; lease released; changeset `superseded`; queue entry removed; principal notified | Control plane |
+| `open`/`proposed`/`merging` → `abandoned` | Overlay lost while the base snapshot survives (data-plane volume loss, doc 14 §8 runbook) | Branch non-terminal; for `merging`, compensation not yet persisted | Reason `overlay_lost` (New, doc 14); otherwise as for `snapshot_lost` | Control plane |
 | `merged`/`rejected`/`abandoned` → `closed` | Retention job | Retention window elapsed since terminal state; data plane confirmed overlay deleted | Overlay ID mapping marked released | Control plane |
 
-A branch in `merging` whose compensation record has been persisted **must not** return to `proposed`; it stays `merging` until apply is retried to completion (section 6.5). A lost base snapshot moves the branch to `abandoned` from any non-terminal state with reason `snapshot_lost`; it is never a reason for `merging → proposed`. A branch **must not** move from a terminal state to any state other than `closed`.
+A branch in `merging` whose compensation record has been persisted **must not** return to `proposed`; it stays `merging` until apply is retried to completion (section 6.5). A lost base snapshot moves the branch to `abandoned` from any non-terminal state with reason `snapshot_lost`; a lost overlay with an intact base snapshot does the same with reason `overlay_lost` (doc 14 §8); neither is ever a reason for `merging → proposed`. A branch **must not** move from a terminal state to any state other than `closed`.
 
 ## 3. Changeset states
 
@@ -400,7 +401,7 @@ The merge ID is the identifier that makes the adapter apply idempotent: an adapt
 | Row delta | Same as overlay | Per target | Lives in data plane beside overlay |
 | Idempotency keys | 24 hours | No | |
 | `events` (control-plane Postgres) | 90 days after the analytics export has passed the partition (doc 07 §6, doc 12 §9) | No | Monthly partition drop |
-| `audit_log` (control-plane Postgres) | 2 years (default pending doc 15) | Doc 15 | Partition drop |
+| `audit_log` (control-plane Postgres) | 2 years | Per org, 1–7 years (`orgs.audit_retention`, doc 12 §1, doc 15) | Partition drop |
 | Orphaned compensation records (no merge checkpoint: merge ID with no `applied` merge) | 7 days | No | From 6.5 failure 6; GC'd by the data plane |
 
 GC runs in the data plane, driven by `closed` transitions from the control plane and by local retention timers for compensation and evidence. The data plane **must not** delete an overlay while its branch is non-terminal; it checks the authoritative state in the heartbeat reply before deleting.

@@ -121,7 +121,7 @@ CREATE TABLE changesets (
   impact              jsonb,                                   -- §5.2
   conflicts_count     integer NOT NULL DEFAULT 0,              -- doc 05 §5.6
   partial_keys_count  integer NOT NULL DEFAULT 0,              -- doc 09 §5.1
-  reversible          boolean,                                 -- delta.reversible (doc 09 §5.1)
+  reversible          text CHECK (reversible IN ('complete','partial')),  -- delta.reversible (doc 09 §5.1)
   row_delta_digest    bytea CHECK (octet_length(row_delta_digest) = 32),  -- SHA-256 (doc 05 §5.2)
   evidence_refs       jsonb NOT NULL DEFAULT '[]',             -- [{path, digest}], never content
   evidence_gap        integer NOT NULL DEFAULT 0,
@@ -317,8 +317,9 @@ Every table also has `org_id`, `inserted_at`, `updated_at`, `UNIQUE (org_id, id)
 
 | Table | Columns | Keys, indexes, checks |
 |---|---|---|
-| `orgs` | `id uuid`, `slug text`, `name text`, `archived_at timestamptz` | PK `id`; `UNIQUE slug`. No `org_id`. |
+| `orgs` | `id uuid`, `slug text`, `name text`, `audit_retention interval NOT NULL DEFAULT '2 years'` (New: doc 15; `CHECK (audit_retention BETWEEN '1 year' AND '7 years')`), `archived_at timestamptz` | PK `id`; `UNIQUE slug`. No `org_id`. |
 | `principals` | `id`, `kind principal_kind`, `slug text`, `display_name text`, `org_admin bool`, `email text` (humans), `sso_subject text` (humans), `disabled_at` | `UNIQUE (org_id, kind, slug)`; the policy-scope form `agent:pricing-bot` is `kind || ':' || slug` (doc 06 §4.2) |
+| `data_planes` | `id`, `org_id`, `region text`, `chart_version text`, `cert_serial text`, `enrolled_at timestamptz`, `last_session_at timestamptz` | PK `id`; `UNIQUE cert_serial`. New: doc 14 §6 enrolment; targets reference it via `targets.data_plane_id` |
 | `api_keys` | `id`, `principal_id`, `prefix text` (the `stw_<prefix>` part), `secret_sha256 bytea(32)`, `scopes text[]` (API-key scopes, doc 10 §3 `resource:verb` list), `target_ids uuid[]`, `last_used_at`, `expires_at`, `revoked_at` | `UNIQUE prefix`; secret never stored (doc 07 §8); pushed to data planes via `RoutingUpsert` (doc 04 §8) |
 | `targets` | `id`, `slug`, `name`, `kind target_kind`, `credential_ref text` (URI, doc 08 §5.5), `data_plane_id text`, `merging_merge_id uuid`, `lease_expires_at`, `last_merge_id uuid`, `created_by`, `archived_at` | `UNIQUE (org_id, slug)`; `CHECK ((merging_merge_id IS NULL) = (lease_expires_at IS NULL))`; `INDEX (lease_expires_at) WHERE merging_merge_id IS NOT NULL` for `ExpiredLeaseScan`. **Decision:** the lease is columns on `targets` as doc 07 §5.4's `UPDATE` requires; no `merge_leases` table |
 | `target_settings` | `target_id` (PK, 1:1), `branch_ttl interval DEFAULT '24 hours'`, `held_ttl interval` (NULL = none), `overlay_retention interval DEFAULT '7 days'`, `compensation_retention interval DEFAULT '90 days'`, `revert_window interval DEFAULT '90 days'`, `uncovered_changeset_verdict verdict_outcome DEFAULT 'hold'` (doc 06 §5.1), `summary_values_allowed jsonb DEFAULT '{}'` (`{table: [column]}`, doc 05 §5.2), `assertion_budget_s int DEFAULT 60`, `assertion_timeout_s int DEFAULT 20`, `impact_timeout_s int DEFAULT 30`, `heartbeat_lost_after interval DEFAULT '5 minutes'`, `merge_lease interval DEFAULT '5 minutes'`, `merge_stall_budget interval DEFAULT '1 hour'`, `separate_approval bool DEFAULT true` | `CHECK (compensation_retention >= revert_window)` (doc 13 §9: compensation is never GC'd while revertable); `CHECK (uncovered_changeset_verdict IN ('hold','auto-merge'))` |
@@ -329,7 +330,7 @@ Every table also has `org_id`, `inserted_at`, `updated_at`, `UNIQUE (org_id, id)
 | `reverts` | `id`, `target_id`, `merge_id` (the merge being reverted), `revert_branch_id` (UNIQUE), `requested_by`, `outcome text` NULL \| `merged` \| `rejected` \| `abandoned` | partial `UNIQUE (merge_id) WHERE outcome IS NULL` (one in-flight revert); partial `UNIQUE (merge_id) WHERE outcome = 'merged'` (doc 02 §3, doc 13 invariant 14) |
 | `compensation_records_meta` | `merge_id` (PK, FK `merges`), `target_id`, `branch_id`, `status compensation_status`, `reserved_by_branch_id uuid`, `consumed_by_branch_id uuid`, `retention_until timestamptz`, `legal_hold bool DEFAULT false`, `row_count bigint`, `bytes bigint`, `partial_keys_count int`, `header_sha256 bytea(32)`, `persisted_at`, `body_deleted_at`, `last_reported_at` | Metadata mirror of the doc 09 index, written from heartbeat `compensation_status`; **never** segments, keys, or images. `INDEX (target_id, status)`. `retention_until` is computed here from `target_settings` (doc 09 §5.5) and delivered downward |
 | `policy_tests` | `id`, `policy_id`, `name`, `fixture jsonb` (synthetic rows: tables, rows, principal, proposed_at; doc 18 §7), `expected_outcome verdict_outcome`, `expected_fired text[]`, `expected_counts jsonb`, `last_run_version_id`, `last_result text`, `last_run_at` | `UNIQUE (policy_id, name)`; `CHECK (pg_column_size(fixture) <= 1048576)` |
-| `review_features` | `review_id` (PK), `changeset_id`, `target_id`, `decision review_decision`, `allow_retry bool`, `reviewer_principal_id`, `branch_principal_id`, `branch_principal_kind principal_kind`, `tables text[]`, `columns text[]`, `row_counts jsonb`, `summary_stats jsonb`, `impact jsonb`, `fired_assertion_ids uuid[]`, `verdict_reason verdict_reason`, `conflicts_count int`, `reversible bool`, `proposed_dow smallint`, `proposed_hour smallint`, `held_seconds int`, `decided_at` | doc 06 §4.3; `inserted_at` only. `INDEX (target_id, decided_at)` |
+| `review_features` | `review_id` (PK), `changeset_id`, `target_id`, `decision review_decision`, `allow_retry bool`, `reviewer_principal_id`, `branch_principal_id`, `branch_principal_kind principal_kind`, `tables text[]`, `columns text[]`, `row_counts jsonb`, `summary_stats jsonb`, `impact jsonb`, `fired_assertion_ids uuid[]`, `verdict_reason verdict_reason`, `conflicts_count int`, `reversible text` (`complete`/`partial`), `proposed_dow smallint`, `proposed_hour smallint`, `held_seconds int`, `decided_at` | doc 06 §4.3; `inserted_at` only. `INDEX (target_id, decided_at)` |
 | `queue_entries` | `target_id`, `changeset_id` (UNIQUE), `branch_id`, `principal_id`, `hold_reasons jsonb` (`[{policy_id, assertion_id, count}]` or `[{reason}]`), `entered_at`, `priority int DEFAULT 0` | PK `id`; keyset index `(org_id, target_id, entered_at, id)` (doc 07 §5.6). Read model, rebuildable |
 | `counter_deltas` | `id bigserial`, `key text`, `scope jsonb`, `delta bigint` | `inserted_at` only; no `updated_at`; drained by `CounterDrain` (doc 07 §5.8) |
 | `counters` | `key text`, `scope jsonb`, `value bigint` | PK `(org_id, key, scope)`; `updated_at` only |
@@ -366,9 +367,10 @@ One enum, `lifecycle_reason`, used by `branches.reason`, `changesets.superseded_
 | Reason | Source | Where it appears |
 |---|---|---|
 | `snapshot_lost` | doc 13 §2.1, doc 08 | branch → `abandoned` from any non-terminal state; merge `failed` |
+| `overlay_lost` | doc 14 §8 (data-volume loss runbook) | branch → `abandoned` from any non-terminal state when the overlay is lost while the base snapshot survives. New: doc 14 |
 | `stale_base` | doc 13 §2.1, §6.5 | merge `failed`; branch `merging → proposed`; changeset superseded (new changeset with conflicts) |
 | `ttl_expired` | doc 13 §6.7 | branch → `abandoned` |
-| `heartbeat_lost` | doc 13 §6.8 (a flag, not a state) | `branch.heartbeat_lost` event only; never a branch `reason` |
+| `heartbeat_lost` | doc 13 §6.8 (a flag, not a state) | `branch.heartbeat_lost` event/alert reason only; **not** a `lifecycle_reason` enum value and never a branch `reason` (doc 07 §5.3) |
 | `policy_error` | doc 13 §6.3 f5, doc 06 | verdict reason (own enum); also `changeset.evaluated` payload |
 | `no_policy_coverage` | doc 06 §5.1 | verdict reason |
 | `revert_conflict` | doc 13 §6.6, doc 07 §5.2 | verdict reason |
@@ -418,7 +420,7 @@ Produced by doc 05 §5.2; the only changeset content the control plane stores. H
   "properties": {
     "format_version": {"const": 1},
     "truncated": {"type": "boolean"},
-    "reversible": {"type": "boolean"},
+    "reversible": {"enum": ["complete", "partial"]},
     "conflicts_count": {"type": "integer", "minimum": 0},
     "conflicts_ref": {"type": "string", "maxLength": 256},
     "partial_keys_count": {"type": "integer", "minimum": 0},
@@ -504,7 +506,7 @@ Every payload extends one envelope; per-type schemas under `contracts/events/` s
 | `branch.merging` | branch | `merge_id`, `changeset_id`, `via` ∈ {`verdict_auto_merge`,`review_approved`} |
 | `branch.merged` | branch | `merge_id` |
 | `branch.rejected` | branch | `changeset_id`, `review_id?` |
-| `branch.abandoned` | branch | `from_state`, `reason` ∈ {`abandoned_by_principal`,`ttl_expired`,`snapshot_lost`} |
+| `branch.abandoned` | branch | `from_state`, `reason` ∈ {`abandoned_by_principal`,`ttl_expired`,`snapshot_lost`,`overlay_lost`} |
 | `branch.closed` | branch | `overlay_released_at` |
 | `branch.returned_to_open` | branch | `reason` ∈ {`withdrawn`,`reject_with_retry`,`stale_base`,`compute_failed`,`data_plane_unreachable`,`compensation_failed`}. New: doc 13 §2.1 has the transition without a name |
 | `branch.heartbeat_lost` | branch | `last_heartbeat_at`, `state` (doc 07 §5.3) |
@@ -523,6 +525,7 @@ Every payload extends one envelope; per-type schemas under `contracts/events/` s
 | `policy.retired` | policy | `policy_version_id` |
 | `target.lease_expired` | target | `merge_id`, `expired_at` (doc 07 §5.4) |
 | `target.lease_released` | target | `merge_id`, `waiting_branch_ids[]` (the `LeaseReleased` consumer of doc 07 §5.4) |
+| `target.health_changed` | target | `status`, `previous_status`, `reasons[]`, `as_of`. New: doc 16 §health |
 | `heartbeat.anomaly` | heartbeat (`aggregate_id` = branch) | `believed`, `authoritative`, `merge_progress?` (doc 07 §5.3 "alert" cells) |
 
 Consumers are Oban jobs inserted in the same transaction, idempotent on `event_id` (doc 07 §5.7). Partitions are dropped 90 days after the `AnalyticsExport` cursor passes them (doc 07 §6).
@@ -533,7 +536,7 @@ The destination (ClickHouse vs Parquet on S3) stays open (doc 03 §11). Three st
 
 | Fact | Grain | Columns |
 |---|---|---|
-| `changeset_facts` | one per `evaluated` changeset | `org_id uuid`, `target_id uuid`, `target_kind utf8`, `changeset_id uuid`, `branch_id uuid`, `sequence int32`, `trigger utf8`, `branch_principal_id uuid`, `branch_principal_kind utf8`, `is_revert bool`, `proposed_at ts(us,UTC)`, `evaluated_at ts`, `compute_ms int32`, `control_plane_ms int32`, `data_plane_ms int32`, `tables list<utf8>`, `columns list<utf8>`, `inserts int64`, `updates int64`, `deletes int64`, `noop_updates int64`, `conflicts_count int32`, `reversible bool`, `evidence_gap int32`, `verdict_outcome utf8`, `verdict_reason utf8`, `policy_version_ids list<uuid>`, `fired_assertion_ids list<uuid>`, `impact map<utf8,double>`, `summary_stats_json utf8` (the per-column aggregates, ≤ 64 KiB), `proposed_dow int8`, `proposed_hour int8`, `superseded bool`, `superseded_reason utf8` |
+| `changeset_facts` | one per `evaluated` changeset | `org_id uuid`, `target_id uuid`, `target_kind utf8`, `changeset_id uuid`, `branch_id uuid`, `sequence int32`, `trigger utf8`, `branch_principal_id uuid`, `branch_principal_kind utf8`, `is_revert bool`, `proposed_at ts(us,UTC)`, `evaluated_at ts`, `compute_ms int32`, `control_plane_ms int32`, `data_plane_ms int32`, `tables list<utf8>`, `columns list<utf8>`, `inserts int64`, `updates int64`, `deletes int64`, `noop_updates int64`, `conflicts_count int32`, `reversible utf8` (`complete`/`partial`), `evidence_gap int32`, `verdict_outcome utf8`, `verdict_reason utf8`, `policy_version_ids list<uuid>`, `fired_assertion_ids list<uuid>`, `impact map<utf8,double>`, `summary_stats_json utf8` (the per-column aggregates, ≤ 64 KiB), `proposed_dow int8`, `proposed_hour int8`, `superseded bool`, `superseded_reason utf8` |
 | `review_facts` | one per review | `org_id`, `target_id`, `review_id`, `changeset_id`, `branch_id`, `reviewer_principal_id`, `branch_principal_id`, `decision utf8`, `allow_retry bool`, `entered_queue_at ts`, `decided_at ts`, `held_seconds int64`, `fired_assertion_ids list<uuid>`, `verdict_reason utf8`, `billable bool` (= human-reviewed, doc 01 §7), `billing_month utf8` |
 | `merge_facts` | one per merge row (including failed) | `org_id`, `target_id`, `target_kind`, `merge_id`, `changeset_id`, `branch_id`, `state utf8`, `reason utf8`, `started_at ts`, `checkpointed_at ts`, `applied_at ts`, `failed_at ts`, `compensated_at ts`, `rows_total int64`, `rows_applied int64`, `compensation_status utf8`, `compensation_bytes int64`, `lease_wait_ms int64`, `stalled bool` |
 
@@ -620,17 +623,17 @@ CREATE TABLE routing (
   believed_state     TEXT NOT NULL CHECK (believed_state IN ('open','proposed','merging','done','dead')),
   frozen             INTEGER NOT NULL DEFAULT 0,
   terminal_reason    TEXT,                                       -- so a late connect gets the per-state terminal code (SD003/SD00A/SD00B/SD00C, doc 10 §4)
-  policy_version_ids TEXT NOT NULL DEFAULT '[]',                 -- JSON array
+  policy_version_set_hash TEXT NOT NULL DEFAULT '',              -- doc 10 RoutingUpsert; the full version id list is fetched by the engine on ComputeChangeset
   touched_tables     TEXT NOT NULL DEFAULT '[]',                 -- JSON array (doc 04 §4)
   updated_at INTEGER NOT NULL, last_heartbeat_reply_at INTEGER,
   PRIMARY KEY (branch_id, overlay_id)
 ) WITHOUT ROWID;
 CREATE UNIQUE INDEX routing_branch ON routing (branch_id);        -- one live overlay per branch
 CREATE TABLE api_keys (
-  key_hash BLOB PRIMARY KEY,                                      -- SHA-256(salt || secret), per-deployment salt
+  key_hash BLOB PRIMARY KEY,                                      -- SHA-256(secret), unsalted, same as the control plane (doc 15)
   prefix TEXT NOT NULL, principal_id TEXT NOT NULL,
   target_ids TEXT NOT NULL DEFAULT '[]', revoked INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL);
-CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);         -- schema_version, salt_id, data_plane_id
+CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);         -- schema_version, data_plane_id
 ```
 
 ### 8.7 Compensation index (SQLite, separate file `compensation.db`; doc 09 §4)
@@ -682,7 +685,7 @@ CREATE TABLE access_log (                                        -- doc 09 §8; 
 | Evidence log | Data plane | Follows compensation for merged branches; follows overlay otherwise | Control plane | Same jobs as the thing it follows |
 | `compensation_records_meta` row | Control-plane Postgres | Indefinite (metadata) | — | None |
 | `events` | Control-plane Postgres | 90 days after export | Fixed | Monthly partition drop, migrator role |
-| `audit_log` | Control-plane Postgres | 2 years (New: default pending doc 15) | Doc 15 | Partition drop |
+| `audit_log` | Control-plane Postgres | 2 years default; per-org 1–7 years (`orgs.audit_retention`, doc 15) | `org_admin` | Partition drop |
 | `idempotency_keys` | Control-plane Postgres | 24 h | Fixed (doc 13 §8) | `IdempotencyPurge` every 10 min |
 | `webhook_deliveries` | Control-plane Postgres | 7 days | Fixed | `DeliveryPurge` daily |
 | `counter_deltas` | Control-plane Postgres | Until drained (seconds) | — | `CounterDrain` |
@@ -761,7 +764,7 @@ erDiagram
 |---|---|---|
 | Analytics store: ClickHouse or Parquet-on-S3 (doc 03 §11). §7 is store-neutral; the choice fixes `AnalyticsExport`'s writer and the 13-month TTL mechanism | Architecture | Before M0 billing |
 | Capability enum: doc 07 names `reviewer`, `policy_admin`, `target_admin`; doc 06 adds `policy_read`, `policy_write`. §2.1 includes all five; doc 10 must confirm the set | Control plane lead | Doc 10 |
-| `audit_log` default retention (2 years here) and whether it is exported to the customer's SIEM | Doc 15 owner | Doc 15 |
+| Whether `audit_log` is exported to the customer's SIEM (retention itself is set: 2 years default, per-org 1–7 years via `orgs.audit_retention`, doc 15) | Doc 15 owner | Doc 15 |
 | Large-object columns in the overlay (`blobs/<sha256>`, doc 05 §12): accept the digest-plus-blob layout in §8.1 | Engine lead | Doc 05 amendment |
 | Should `events.actor_principal_id` be mandatory for principal-initiated transitions, with a CHECK against `payload.actor`? | Control plane lead | Before M0 |
 | Per-adapter-kind defaults for `target_settings` (TTL, assertion budgets; doc 13 §12, doc 06 §12): a `target_kind_defaults` table or Helm values? | Founding team | Doc 14 |

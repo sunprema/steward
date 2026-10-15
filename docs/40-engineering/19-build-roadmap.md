@@ -75,7 +75,7 @@ Sizes: S ≤ 1 engineer-week, M 1–3 weeks, L 3–6 weeks. Item IDs are stable 
 | C3 | `tools/fixtures` | doc 03 §7 p9; doc 18 §7; doc 05 §10; doc 06 §10 | Synthetic targets and agent write patterns at 1k/100k/1M rows; golden changesets and verdicts | — | M |
 | C4 | Local stack | doc 18 §8; doc 08 §10 | `tools/stack up`: metadata Postgres, Neon-compatible pageserver + plain Postgres fallback as sample target, MinIO, proxy, engine, adapter host, control plane | C1, P1, R3, J1, E1 (stubs first, §5) | M |
 | C5 | `tools/e2e` | doc 10 §7 A–C; doc 11 §13; doc 09 §10; doc 17 | Scenarios 1–3 (below) executed against the local stack as OpenAPI contract tests | C4 | M |
-| C6 | `tools/replay` | doc 04 §10; doc 03 §7 p9 | Replay harness and load test feeding C3 patterns through the proxy | C3, P4 | M |
+| C6 | `tools/loadgen` | doc 04 §10; doc 03 §7 p9 | Load driver with `replay` subcommand (`tools/loadgen replay`) feeding C3 patterns through the proxy | C3, P4 | M |
 | R1 | `steward-overlay` crate | doc 05 §4.1, §5.5; doc 12 §8.2–8.4 | WAL format, segment schema, manifest with conditional PUT, freeze/unfreeze markers, async roll, net-op reader, `view()` | C1 | L |
 | R2 | Engine | doc 05 §4.2 | Compaction with 10-minute segment grace | R1 | S |
 | R3 | `steward-engine` process | doc 05 §5.1; doc 10 §5; doc 13 §6.8; doc 07 §5.3 | gRPC UDS server, outbound `Session` stream with jittered reconnect, heartbeat sender folding `ProxyFacts`, instruction dispatch, first-heartbeat delay 0–30 s | C1 | M |
@@ -151,6 +151,7 @@ Sizes: S ≤ 1 engineer-week, M 1–3 weeks, L 3–6 weeks. Item IDs are stable 
 | M1-R2 | Partial compensation | doc 09 §5.1, §10 | `partial` records, `partial-keys.parquet`, `delta.reversible` built-in assertion with default `hold`, revert `hold` floor on `partial_keys` | M0 R8 | M |
 | M1-R3 | Engine scale | doc 05 §7, §12; doc 14 | 10M-row benchmark promoted or revised; per-target sandbox overrides | M0 R4 | M |
 | M1-P2 | Read-your-writes joins | doc 04 §5.2, §12 | Merged-read support envelope widened to the join shapes and functions doc 04 §12 lists; `SD005` only outside it | M0 P5 | M |
+| M1-P3 | Multi-replica proxy | doc 04 §6, §7; doc 14 | Multi-replica proxy with shared routing store; M0 is single-pod (doc 14) and scales `max_connections` vertically | M0 P1 | M |
 | M1-S1 | TypeScript SDK | doc 11 §2.2, §2.3, §5–7 | Full ergonomic surface: `branch()` callback, `AsyncDisposable`, `poolConfig`, `wait`, `admin` | M0 S2 | M |
 | M1-E1 | Customer-facing health | doc 16; doc 01 §9; doc 06 §9; doc 07 §9 | Queue-depth trend, auto-merge rate, `held_over_7d`, `compensation_partial_ratio` per target in the UI and API | M0 E8 | M |
 | M1-E2 | Compliance export | doc 09 §5.6; doc 10 §3.3 | Signed export bundle under `compensation:export` grant | M0 R8, R10 | S |

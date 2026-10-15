@@ -206,7 +206,7 @@ No JS framework (doc 18 §2); the row-delta viewer is a LiveView component that 
 | Measure | Value | Kind |
 |---|---|---|
 | Create branch, control-plane portion (tx 1 + tx 2 + GenServer start), p99 | ≤ 150 ms | Requirement |
-| Create branch end to end incl. overlay init, p99 | ≤ 1 s (doc 03 §5) | Requirement; data-plane budget in doc 04 |
+| Create branch end to end incl. overlay init, p99 | ≤ 3 s (control-plane portion ≤ 150 ms; dominated by adapter `openSnapshot` ≤ 2 s on Neon, doc 08 §7) | Requirement; data-plane budget in docs 04 and 08 |
 | Propose, control-plane portion (step 1 tx + step 9 tx + enqueue), p99 | ≤ 200 ms | Requirement |
 | Review decision tx, p99 | ≤ 100 ms | Requirement |
 | Heartbeat throughput | 100k branches × 1/30 s ≈ 3.3k/s cluster-wide; 2k/s per node sustained, 6k/s burst for 30 s | Estimate of load; per-node figure is a requirement for doc 17's load test |
@@ -232,7 +232,7 @@ No JS framework (doc 18 §2); the row-delta viewer is a LiveView component that 
 
 Three signals first: (1) `steward_heartbeat_lag_seconds` histogram (now − `last_heartbeat_at` across non-terminal branches) and its `heartbeat_lost` count; (2) Oban queue depth and oldest-job age per queue; (3) transition error rate (`stale_transition`, 503s) per transition type.
 
-Also emitted: `steward_genservers_total{state}` vs non-terminal rows; `steward_heartbeats_total{result}` incl. rate-limited; heartbeat matrix cell counts with `alert` cells as a paging alert; `queue_depth{target}` from counters; transition rate by `from,to`; lease waits and expiries; `counter_deltas` backlog rows; LiveView mount duration by page; gRPC and Phoenix request latency; Ecto query time. Traces: one span per API request and per heartbeat, propagated to data-plane calls via gRPC metadata. Logs carry `org_id`, `branch_id`, `changeset_id`, `principal_id`, never payloads.
+Also emitted: `steward_genservers_total{state}` vs non-terminal rows; `steward_heartbeats_total{result}` incl. rate-limited; heartbeat matrix cell counts with `alert` cells as a paging alert; `queue_depth{target}` from counters; transition rate by `from,to`; lease waits and expiries; `counter_deltas` backlog rows; LiveView mount duration by page; gRPC and Phoenix request latency; Ecto query time. Traces: one span per API request and per heartbeat, propagated to data-plane calls via the `trace_context` field on stream messages (doc 10 §5, W3C traceparent). Logs carry `org_id`, `branch_id`, `changeset_id`, `principal_id`, never payloads.
 
 ## 10. Testing
 
@@ -240,7 +240,7 @@ Also emitted: `steward_genservers_total{state}` vs non-terminal rows; `steward_h
 - **State-machine property test (StreamData).** Generates random sequences of triggers against a branch; asserts that every reachable transition is in doc 13 §2.1 and no other transition ever occurs, that invariants 2–4, 11 and 12 hold after every step, and that `lock_version` conflicts never produce a partial write.
 - **Heartbeat matrix test.** Enumerates all 40 cells (5 believed × 8 authoritative) of doc 13 §6.8 against `Heartbeat.decide/3` with expected replies and actions, so a doc change must change this table.
 - **Concurrency.** Two reviewers deciding in parallel tasks; exactly one `review` row; the other gets `already_reviewed`.
-- **Fake data plane.** A gRPC stub under `control/test/support/fake_data_plane.ex` implementing the data-plane services with scripted behaviours (slow, lost reply, `stale_base`, crash before/after compensation checkpoint) for integration tests under `control/tests/integration` covering every failure row of doc 13 §6.
+- **Fake data plane.** A gRPC stub under `control/test/support/fake_data_plane.ex` implementing the data-plane services with scripted behaviours (slow, lost reply, `stale_base`, crash before/after compensation checkpoint) for integration tests under `control/test/integration` covering every failure row of doc 13 §6.
 - **Boot and storm.** 100k branch rows → boot sweep time and process count; 100k heartbeats in 1 s → rate-limit behaviour and no dropped transitions.
 - **Org isolation test** (§8) and a **row-data test** that feeds a summary with a stray `rows` key and asserts rejection.
 - **Fixtures.** Synthetic only, from `tools/fixtures` (doc 18 §7). Policy tests are data under `control/test/policies/` (doc 06).

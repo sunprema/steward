@@ -23,7 +23,7 @@ This document is the one place that says how Steward is tested: the principles, 
 | Property | `proptest` (seeded; `PROPTEST_CASES` 256 on PR, 10,000 nightly) | StreamData (100 runs on PR, 2,000 nightly) | jqwik (`tries = 100` on PR, 1,000 nightly) | Hypothesis / fast-check for the error-mapping layer only |
 | Golden / snapshot | `insta` snapshots under `tests/golden/` (doc 05 §10); review with `cargo insta review` | Golden verdict files under `control/test/policies/` (doc 06 §10) | — | Recorded HTTP cassettes (doc 11 §13) |
 | Fuzz | `cargo fuzz` targets in `engine/fuzz/` and `proxy/fuzz/` (doc 06 §10); 10 min per target nightly, corpus checked in | — | — | — |
-| Integration | `<area>/tests/integration` against the local stack or MinIO + Postgres containers (doc 18 §7) | `control/tests/integration` with the fake data plane (doc 07 §10) | Testcontainers (doc 08 §10) | `sdk/<lang>/tests/integration` against the local stack (doc 11 §13) |
+| Integration | `<area>/tests/integration` against the local stack or MinIO + Postgres containers (doc 18 §7) | `control/test/integration` with the fake data plane (doc 07 §10) | Testcontainers (doc 08 §10) | `sdk/<lang>/tests/integration` against the local stack (doc 11 §13) |
 | UI | — | LiveView tests (`Phoenix.LiveViewTest`) for every page in doc 07 §5.6; Wallaby for the two browser-only flows (row-delta grant fetch hook, SSO login) | — | MCP inspector conformance (doc 11 §13) |
 | Bench | `criterion` under `benches/`, 5 % gate (doc 18 §3) | `Benchee` for `evaluate` (doc 06 §10) and heartbeat decide | JMH for `readRows` / `apply` throughput (doc 08 §7 requirements) | — |
 | E2E | `tools/e2e` (§5), language-neutral: a Python driver script per scenario | | | |
@@ -69,7 +69,7 @@ Each subsection consolidates the spec's §10 into named tests. Names are identif
 | `freeze_marker_atomicity` | integration | Concurrent writers while `FreezeWrites` lands: every write is either `seq ≤ freeze.last_seq` in the overlay or rejected `SD001`; no third case; WAL `FREEZE` record and `freeze.json` agree on `last_seq` |
 | `unfreeze_excludes_span` | integration | `FREEZE`/`UNFREEZE` pair; ops between are excluded from `view()` and `ComputeChangeset` |
 | `sd_code_mapping` | unit | Every `SD` code in doc 11 §4.1 is produced by exactly one path; message never contains a literal from the statement (sentinel grep) |
-| `replay_harness` | `tools/replay` | Recorded synthetic sessions (statements + timings) → asserts overlay contents, evidence records, latency histograms; doubles as load (doc 03 principle 9) |
+| `replay_harness` | `tools/loadgen replay` | Recorded synthetic sessions (statements + timings) → asserts overlay contents, evidence records, latency histograms; doubles as load (doc 03 principle 9) |
 | `failure_injection::*` | integration | Kill adapter host mid-transaction (buffer kept, `SD007`); overlay volume read-only (`SD007`, nothing acknowledged); routing store corrupted (`SD007`, rebuilt from heartbeat within 60 s); control-plane stub stopped (no effect on queries) |
 | `routing_store_durability` | integration | Restart proxy; routing rows survive; never purged wholesale |
 | `evidence_gap_counted` | unit | Evidence append failure increments `evidence_gap`, write still acknowledged |
@@ -181,7 +181,7 @@ Fixtures per doc 08 §10: Testcontainers Postgres 16 + Neon-compatible pageserve
 | `gc_rules` | Each of the five conditions of doc 09 §5.5 individually blocks GC; orphan (`merge_applied = 0`) expires after 7 days; headers retained |
 | `chain_verification` | `VerifyChain` over N records; a forced `prev_hash` mismatch refuses `Persist` |
 | `inverse_rules_conformance` | Module and doc 05 produce byte-identical bodies |
-| `partial_record` | Fixture adapter withholds before-images for one column → `partial`, keys file present, `delta.reversible = false` in summary, `hold` floor on the revert verdict |
+| `partial_record` | Fixture adapter withholds before-images for one column → `partial`, keys file present, `delta.reversible = 'partial'` in summary, `hold` floor on the revert verdict |
 | `grant_tests` | Expired, wrong-scope, replayed grants refused; each accepted read yields one audit event |
 | `apply_then_revert_e2e` | Property through the whole path (E2E 4) |
 
