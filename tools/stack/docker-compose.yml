@@ -1,0 +1,196 @@
+# Steward local stack (doc 18 §8, doc 17 §5, doc 14 §9).
+#
+# Bring it up with `tools/stack up`, never with `docker compose up` directly:
+# the wrapper waits for healthchecks, loads fixtures into target-db, and prints
+# the connection strings. Every component must run under this stack; a change
+# that breaks it is not done (doc 18 §8).
+#
+# Ports are read from tools/stack/.env (copy .env.example); the defaults below
+# apply when no .env exists.
+
+name: steward
+
+services:
+  # ---------------------------------------------------------------------------
+  # Control-plane metadata Postgres (doc 12 §1-2). Database `steward_control`.
+  # ---------------------------------------------------------------------------
+  control-db:
+    image: postgres:16
+    container_name: steward-control-db
+    environment:
+      POSTGRES_DB: ${CONTROL_DB_NAME:-steward_control}
+      POSTGRES_USER: ${CONTROL_DB_USER:-steward}
+      POSTGRES_PASSWORD: ${CONTROL_DB_PASSWORD:-steward}
+    ports:
+      - "${CONTROL_DB_PORT:-5433}:5432"
+    volumes:
+      - control-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CONTROL_DB_USER:-steward} -d ${CONTROL_DB_NAME:-steward_control}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Sample governed target Postgres: the retail schema from doc 17 §11, seeded
+  # by tools/fixtures/load. Logical replication is on because the M0 substrate
+  # shape is "a Neon replica fed by logical replication" (doc 08 §11, doc 14 §2);
+  # the replication slot limits are sized for a handful of local subscribers.
+  # ---------------------------------------------------------------------------
+  target-db:
+    image: postgres:16
+    container_name: steward-target-db
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=8
+      - -c
+      - max_wal_senders=8
+      - -c
+      - track_commit_timestamp=on
+    environment:
+      POSTGRES_DB: ${TARGET_DB_NAME:-retail}
+      POSTGRES_USER: ${TARGET_DB_USER:-retail}
+      POSTGRES_PASSWORD: ${TARGET_DB_PASSWORD:-retail}
+      # Password for the least-privilege role created by tools/fixtures/schema.sql
+      # (doc 08 §8). Exposed to psql via -v when `load` runs.
+      STEWARD_ADAPTER_PASSWORD: ${STEWARD_ADAPTER_PASSWORD:-steward_adapter}
+    ports:
+      - "${TARGET_DB_PORT:-5434}:5432"
+    volumes:
+      - target-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TARGET_DB_USER:-retail} -d ${TARGET_DB_NAME:-retail}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Object store (doc 12 §8.1 path layout lives under bucket `steward`).
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: steward-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-steward}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-stewardsteward}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  # One-shot: create the `steward` bucket, then exit 0.
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    container_name: steward-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-steward}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-stewardsteward}
+      MINIO_BUCKET: ${MINIO_BUCKET:-steward}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "local/$$MINIO_BUCKET"
+        echo "bucket $$MINIO_BUCKET ready"
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Steward components. Each block is enabled as its milestone lands (doc 19):
+  # uncomment, point `build.context` at the directory, and keep `tools/stack up`
+  # green. The three data-plane containers share /run/steward for their Unix
+  # domain sockets exactly as the pod does in doc 14 §2 (engine.sock,
+  # adapter.sock, proxy-facts.sock).
+  # ---------------------------------------------------------------------------
+
+  # steward-proxy:                      # doc 04 — Postgres wire protocol on 5432
+  #   build: { context: ../../proxy }
+  #   image: ghcr.io/steward/proxy:dev
+  #   depends_on:
+  #     target-db: { condition: service_healthy }
+  #     minio-init: { condition: service_completed_successfully }
+  #   environment:
+  #     STEWARD_ENGINE_SOCKET: /run/steward/engine.sock
+  #     STEWARD_ADAPTER_SOCKET: /run/steward/adapter.sock
+  #     STEWARD_PROXY_FACTS_SOCKET: /run/steward/proxy-facts.sock
+  #     STEWARD_DATA_DIR: /var/lib/steward
+  #   ports:
+  #     - "${PROXY_PORT:-5432}:5432"
+  #   volumes:
+  #     - steward-run:/run/steward
+  #     - steward-data:/var/lib/steward
+
+  # steward-engine:                     # doc 05 — gRPC over /run/steward/engine.sock
+  #   build: { context: ../../engine }  #          plus the grant endpoint on 8443 (doc 14 §4)
+  #   image: ghcr.io/steward/engine:dev
+  #   depends_on:
+  #     minio-init: { condition: service_completed_successfully }
+  #   environment:
+  #     STEWARD_ENGINE_SOCKET: /run/steward/engine.sock
+  #     STEWARD_ADAPTER_SOCKET: /run/steward/adapter.sock
+  #     STEWARD_PROXY_FACTS_SOCKET: /run/steward/proxy-facts.sock
+  #     STEWARD_CONTROL_GRPC: steward-control:50051
+  #     STEWARD_OBJECT_STORE_ENDPOINT: http://minio:9000
+  #     STEWARD_OBJECT_STORE_BUCKET: ${MINIO_BUCKET:-steward}
+  #     AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-steward}
+  #     AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-stewardsteward}
+  #     STEWARD_DATA_DIR: /var/lib/steward
+  #     STEWARD_SCRATCH_DIR: /var/lib/steward-scratch
+  #   ports:
+  #     - "${ENGINE_GRANT_PORT:-8443}:8443"
+  #   volumes:
+  #     - steward-run:/run/steward
+  #     - steward-data:/var/lib/steward
+  #     - steward-scratch:/var/lib/steward-scratch
+
+  # steward-adapters:                   # doc 08 — adapter host, gRPC over /run/steward/adapter.sock, no TCP listener
+  #   build: { context: ../../adapters }
+  #   image: ghcr.io/steward/adapters:dev
+  #   depends_on:
+  #     target-db: { condition: service_healthy }
+  #   environment:
+  #     STEWARD_ADAPTER_SOCKET: /run/steward/adapter.sock
+  #     # The adapter host is the only process with target credentials (doc 08 §8).
+  #     STEWARD_TARGET_RETAIL_DSN: postgres://steward_adapter:${STEWARD_ADAPTER_PASSWORD:-steward_adapter}@target-db:5432/${TARGET_DB_NAME:-retail}
+  #   volumes:
+  #     - steward-run:/run/steward
+
+  # steward-control:                    # doc 07 — Phoenix HTTP on 4000, gRPC Session on 50051
+  #   build: { context: ../../control }
+  #   image: ghcr.io/steward/control:dev
+  #   depends_on:
+  #     control-db: { condition: service_healthy }
+  #   environment:
+  #     DATABASE_URL: postgres://${CONTROL_DB_USER:-steward}:${CONTROL_DB_PASSWORD:-steward}@control-db:5432/${CONTROL_DB_NAME:-steward_control}
+  #     PHX_HOST: localhost
+  #     PORT: "4000"
+  #     GRPC_PORT: "50051"
+  #     OIDC_ISSUER: http://fake-oidc:8080   # doc 17 §5: fake OIDC provider, to be added with the control plane
+  #   ports:
+  #     - "${CONTROL_HTTP_PORT:-4000}:4000"
+  #     - "${CONTROL_GRPC_PORT:-50051}:50051"
+
+volumes:
+  control-db-data:
+  target-db-data:
+  minio-data:
+  # Used by the commented-out Steward components above; harmless while unused.
+  steward-run:
+  steward-data:
+  steward-scratch:
