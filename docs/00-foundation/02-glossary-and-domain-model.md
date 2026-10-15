@@ -17,7 +17,7 @@ The connector that lets Steward talk to one kind of target. An adapter knows how
 ### Branch
 An isolated, short-lived overlay on a target. Reads fall through to the target as of the branch's **base snapshot**; writes land in the branch's **overlay**. A branch belongs to exactly one target and one **principal**. Branches are cheap enough to create one per agent task and are expected to live minutes to hours, not days.
 
-A branch has a **lifecycle** (doc 13): `open → proposed → (merging | rejected | abandoned) → merged | closed`.
+A branch has a **lifecycle** (doc 13): `open → proposed → (merging | rejected | abandoned) → merged | closed`. A branch in `merging` may return to `proposed` if the merge fails before its checkpoint (for example, a stale base). Doc 13 is authoritative for every transition.
 
 ### Base snapshot
 The point-in-time view of the target that a branch was created from. Every read through the branch that is not shadowed by the overlay returns data as of this snapshot. How the snapshot is realised depends on the adapter (a Postgres copy-on-write branch, an Iceberg snapshot ID, a timestamp for a CRM).
