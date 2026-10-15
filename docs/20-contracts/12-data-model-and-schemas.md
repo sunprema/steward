@@ -4,7 +4,16 @@
 **Owner:** Founding team
 **Last updated:** 2026-10-15
 
-The source for every durable schema Steward owns: the control-plane metadata Postgres (Ecto migrations are generated from the DDL here), the data-plane storage layouts (overlay WAL and Parquet segments, manifest, freeze marker, compensation record, routing store, compensation index, evidence log), the JSON that crosses the plane boundary (summary, impact, events), the analytics export, retention, the tenancy rule, and the migration policy. It owns storage shapes, not API (doc 10) or SDK (doc 11) shapes. Where a component spec sketched a table, this document is authoritative for its columns; where doc 13 states an invariant a database can encode, the DDL encodes it.
+The source for every durable schema Steward owns: the control-plane metadata Postgres (migrations are generated from the Ash resources, which the DDL here is the reference for; §0), the data-plane storage layouts (overlay WAL and Parquet segments, manifest, freeze marker, compensation record, routing store, compensation index, evidence log), the JSON that crosses the plane boundary (summary, impact, events), the analytics export, retention, the tenancy rule, and the migration policy. It owns storage shapes, not API (doc 10) or SDK (doc 11) shapes. Where a component spec sketched a table, this document is authoritative for its columns; where doc 13 states an invariant a database can encode, the DDL encodes it.
+
+## 0. Source of truth: Ash resources
+
+The control plane's domain layer is Ash 3 (doc 07 §5.0). Every table in §2 is an `Ash.Resource` with the `AshPostgres` data layer in `steward_core`, and the resources are the source of truth for the control-plane schema: migrations are generated from them with `mix ash.codegen`, committed, and reviewed (doc 18 §2). The DDL in §2 is the reference the generated migrations **must** match; CI diffs the schema the migrations produce against it and fails on drift, so a change to §2 and a change to a resource are the same change and go through doc 18 §5 together. Where the DDL encodes something Ash cannot express (partial unique indexes with subqueries, triggers, partitioning, the append-only grants of §2.5), it is a `custom_statements` or hand-written migration fragment, still committed next to the generated one.
+
+- The `state` columns of `branches`, `changesets`, `merges`, `policies` and `policy_versions` are the attribute `AshStateMachine` generates; the §3 enums and doc 13 §2.1's transitions are declared literally in the resource, and the transition guard (`WHERE state = ? AND lock_version = ?`) is the state machine's, not a hand-written one.
+- Multi-tenancy is Ash multitenancy with the attribute strategy on `org_id` (§10); every resource except `orgs` declares it.
+- The `events` table (§6) is appended by an `AppendEvent` change on every mutating action of a truth resource, through an `after_action` hook inside the action's transaction (not a notifier, which would run after commit); the event and its consumer Oban jobs commit with the state change or not at all (doc 07 §5.0).
+- Read-model tables (`queue_entries`, `counters`, `counter_deltas`) are resources too, with no `AppendEvent` change and with their bulk statements (doc 07 §5.8) as the reviewed raw-SQL exceptions doc 18 §2 allows.
 
 ## 1. Conventions
 
@@ -343,7 +352,7 @@ Every table also has `org_id`, `inserted_at`, `updated_at`, `UNIQUE (org_id, id)
 ### 2.4 Standard triggers
 
 - `set_updated_at()` BEFORE UPDATE wherever `updated_at` exists. `lock_version` is **not** trigger-bumped: it is incremented in the conditional `UPDATE ... WHERE lock_version = ?` so a zero-row update is `stale_transition` (doc 07 §5).
-- `validate_boundary_json()` BEFORE INSERT OR UPDATE on `changesets.summary/impact`, `events.payload`, `review_features`, `queue_entries.hold_reasons`, `audit_log.details`: rejects any object containing a key in `('rows','row','sample_keys','before_image','after_image','values','key','keys')` at any depth. Defence in depth behind the Ecto embedded-schema check (doc 07 §8).
+- `validate_boundary_json()` BEFORE INSERT OR UPDATE on `changesets.summary/impact`, `events.payload`, `review_features`, `queue_entries.hold_reasons`, `audit_log.details`: rejects any object containing a key in `('rows','row','sample_keys','before_image','after_image','values','key','keys')` at any depth. Defence in depth behind the embedded Ash resource check (doc 07 §8).
 
 ### 2.5 Append-only tables
 
@@ -446,7 +455,7 @@ Produced by doc 05 §5.2; the only changeset content the control plane stores. H
   }}
 ```
 
-`distinct_values` **must** be absent unless `(table_name, column_name)` is in `target_settings.summary_values_allowed` (doc 05 §5.2); the engine enforces it and Ecto rejects it otherwise. Keys, images, and `conflicts.t` rows never appear; `conflicts_ref` is a grant-served locator.
+`distinct_values` **must** be absent unless `(table_name, column_name)` is in `target_settings.summary_values_allowed` (doc 05 §5.2); the engine enforces it and the embedded `Summary` resource rejects it otherwise. Keys, images, and `conflicts.t` rows never appear; `conflicts_ref` is a grant-served locator.
 
 ### 5.2 Impact (`changesets.impact`)
 
@@ -695,9 +704,9 @@ CREATE TABLE access_log (                                        -- doc 09 §8; 
 
 ## 10. Multi-tenancy enforcement
 
-1. **Rule.** Every table except `orgs`, `oban_jobs`, `schema_migrations` has `org_id`; FKs that could cross an org are composite on `(org_id, id)`; `Steward.Repo.prepare_query/3` raises `MissingOrgScope` unless the query binds `org_id` or is tagged `skip_org_check: true` (doc 07 §8).
-2. **Test.** `Steward.Schema.OrgIdTest` enumerates every module exporting `__schema__/1`, asserts `:org_id` is a `null: false` field, and asserts the allow-list is exactly those three tables. A second test fails any migration with `references(` lacking `with: [org_id: :org_id]` on the §2.2 tables.
-3. **Row-level security. Decision: not in M0.** Ecto connects as one role; RLS would need `SET LOCAL steward.org_id` in every transaction including Oban's, for a guarantee `prepare_query` already gives. The schema is RLS-ready; the M1 migration is `ENABLE ROW LEVEL SECURITY` plus one `CREATE POLICY ... USING (org_id = current_setting('steward.org_id')::uuid)` per table, additive. Revisit at the first enterprise security review (doc 15).
+1. **Rule.** Every table except `orgs`, `oban_jobs`, `schema_migrations` has `org_id`; FKs that could cross an org are composite on `(org_id, id)`; every resource declares Ash multitenancy with `strategy :attribute, attribute :org_id`, so an action or query without a tenant raises `Ash.Error.Invalid.TenantRequired` and every read and write is filtered by `org_id` (doc 07 §8). The hand-written `prepare_query` hook of the original design is replaced by this declaration; the only bypass is `Ash.Query.set_tenant/2` with the system tenant in `steward_jobs` scans, reviewed.
+2. **Test.** `Steward.Schema.OrgIdTest` enumerates every resource in every domain (`Ash.Domain.Info.resources/1`), asserts `:org_id` is a non-nullable attribute and that the multitenancy strategy is `:attribute` on it, and asserts the allow-list is exactly those three tables. A second test fails any migration with `references(` lacking `with: [org_id: :org_id]` on the §2.2 tables (`AshPostgres` emits this from the relationship's `multitenancy` reference; the test guards the generated output).
+3. **Row-level security. Decision: not in M0.** The Repo connects as one role; RLS would need `SET LOCAL steward.org_id` in every transaction including Oban's, for a guarantee attribute multitenancy already gives. The schema is RLS-ready; the M1 migration is `ENABLE ROW LEVEL SECURITY` plus one `CREATE POLICY ... USING (org_id = current_setting('steward.org_id')::uuid)` per table, additive. Revisit at the first enterprise security review (doc 15).
 
 ## 11. Migration policy
 

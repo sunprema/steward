@@ -38,10 +38,16 @@ Shared protocol definitions (protobuf, OpenAPI) live in `contracts/` and are the
 
 ### Elixir (`control/`)
 - `mix format` and `mix credo --strict` must pass. Dialyzer runs in CI; new warnings fail the build.
-- One GenServer per branch, supervised. State that must survive a restart lives in Postgres, never only in process state.
-- Ecto for all database access. No raw SQL except in migrations and explicitly reviewed read-model queries.
-- LiveView for the review UI. Add a JS framework only with an accepted design doc explaining why LiveView cannot do it.
-- Jobs: Oban. No ad-hoc `Task.start` for anything that must complete.
+- Domain layer: Ash 3.x (doc 07 §5.0). One `Ash.Resource` per doc 12 table, in the domain doc 07 §4 assigns it. Ash actions are the only write path.
+- No `Ecto.Changeset`, `Repo.insert/update/delete`, or raw SQL in application code. Exceptions: migrations, and explicitly reviewed read-model queries (doc 07 §5.8) where an Ash read action cannot express the statement; prefer an Ash read action, calculation or aggregate first. Ecto stays underneath Ash and is not imported by application modules.
+- Migrations are generated from resources by `mix ash.codegen <name>`; the generated migration **must** be committed and reviewed in the same PR as the resource change, and `mix ash.codegen --check` runs in CI. Doc 12's DDL is the reference the generated schema must match.
+- Every action declares `Ash.Policy` policies; the coverage test (doc 07 §10) fails an action with none. Controllers and LiveViews pass `actor:` and `tenant:` and never check a capability themselves.
+- Every resource except `Org` declares attribute multitenancy on `org_id`.
+- Stateful resources (`Branch`, `Changeset`, `Merge`, `Policy`, `PolicyVersion`) use `AshStateMachine`; transitions are declared literally from doc 13 §2.1 and doc 06 §5.2, never implemented as conditional updates.
+- Multi-step flows with a checkpoint are one `Reactor` each (doc 07 §5.0): compensable steps before the checkpoint, best-effort steps after it, remote calls only as reactor steps.
+- One GenServer per branch, supervised; it calls actions and never writes rows itself. State that must survive a restart lives in Postgres, never only in process state.
+- LiveView for the review UI, with `AshPhoenix.Form` over the same actions. Add a JS framework only with an accepted design doc explaining why LiveView cannot do it.
+- Jobs: AshOban triggers and scheduled actions; consumer jobs inserted in the action's transaction. No ad-hoc `Task.start` for anything that must complete.
 
 ### Java (`adapters/`)
 - Java 21. Gradle with the version catalog in `gradle/libs.versions.toml`.

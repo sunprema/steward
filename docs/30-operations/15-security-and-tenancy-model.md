@@ -37,7 +37,7 @@ Steward's security story is the plane boundary of doc 03 §2: row data stays in 
 
 Restating doc 03 §2 as invariants that tests enforce (§12):
 
-1. **Row data never crosses the boundary.** No field in `steward.plane.v1` (doc 10 §5) or in `/v1` REST responses served by the control plane can carry a row, a key, or a value, except `distinct_values` under the per-column allow-list (doc 05 §5.2). Enforced by protobuf shape, Ecto embedded schemas rejecting unknown keys (doc 07 §8), `validate_boundary_json()` (doc 12 §2.4), and the 1 MiB message cap (doc 10 §5).
+1. **Row data never crosses the boundary.** No field in `steward.plane.v1` (doc 10 §5) or in `/v1` REST responses served by the control plane can carry a row, a key, or a value, except `distinct_values` under the per-column allow-list (doc 05 §5.2). Enforced by protobuf shape, embedded Ash resources rejecting unknown keys (doc 07 §8), `validate_boundary_json()` (doc 12 §2.4), and the 1 MiB message cap (doc 10 §5).
 2. **The control plane never holds target credentials.** It holds `credential_ref` URIs only (doc 08 §5.5). The adapter host is the only process that resolves them.
 3. **The data plane never dials out except to an allowlist:** the control plane's gRPC host on 443 (one egress rule, doc 10 §5), the targets, the customer's object store and secret store (doc 08 §3.2). The proxy opens no network connection outside the customer's cloud (doc 04 §3.2). Doc 14's network policy enforces this.
 4. **The data plane never advances branch state on its own** (doc 13 §1); every transition is a control-plane transaction with an event.
@@ -126,8 +126,8 @@ Humans hold **membership capabilities** on `target_memberships`: `reviewer`, `po
 
 Doc 12 §10 is restated and extended:
 
-1. Every table except `orgs`, `oban_jobs`, `schema_migrations` carries `org_id NOT NULL`; cross-org FKs are composite on `(org_id, id)`; `Steward.Repo.prepare_query/3` raises `MissingOrgScope` on an unscoped query unless tagged `skip_org_check: true` (allowed only in `steward_jobs` system scans, each reviewed).
-2. **Row-level security is not in M0** (doc 12 §10). Compensating controls: (a) the `prepare_query` guard; (b) `Steward.Schema.OrgIdTest` and the migration test (doc 12 §10); (c) an integration test that creates two orgs, exercises every `/v1` endpoint as org A against ids belonging to org B, and asserts `404 not_found` on every call (doc 10 §2.1: never distinguishes absent from foreign); (d) a CI grep that fails on `skip_org_check` outside `steward_jobs`. RLS is the M1 migration described in doc 12 §10 and **must** land before the first enterprise security review.
+1. Every table except `orgs`, `oban_jobs`, `schema_migrations` carries `org_id NOT NULL`; cross-org FKs are composite on `(org_id, id)`; Ash attribute multitenancy on `org_id` (doc 12 §10) rejects any action or query without a tenant unless the resource declares `global? true` (allowed only for `steward_jobs` system scans, each reviewed).
+2. **Row-level security is not in M0** (doc 12 §10). Compensating controls: (a) Ash attribute multitenancy; (b) `Steward.Schema.OrgIdTest` and the migration test (doc 12 §10); (c) an integration test that creates two orgs, exercises every `/v1` endpoint as org A against ids belonging to org B, and asserts `404 not_found` on every call (doc 10 §2.1: never distinguishes absent from foreign); (d) a CI grep that fails on `global? true` outside `steward_jobs`. RLS is the M1 migration described in doc 12 §10 and **must** land before the first enterprise security review.
 3. `404` for foreign resources, never `403`, so a tenant cannot enumerate another's ids.
 4. Idempotency keys, rate-limit buckets, and counters are keyed by org (doc 12 §2.2, doc 10 §2), so one tenant's replay or burst cannot affect another's.
 
@@ -238,11 +238,11 @@ Resolving doc 03 §11's open question. Evidence records (doc 12 §8.8) carry `st
 | Sev | Definition | Response | Examples |
 |---|---|---|---|
 | 1 | Confirmed or suspected row data outside the customer's cloud; credential compromise; an unreviewed changeset reaching production that policy should have held (doc 01 §10) | Page immediately; customer notified within 24 h of confirmation; written report within 5 business days | Boundary validator fires in production; grant key leaked |
-| 2 | Integrity of audit or compensation in doubt; cross-tenant metadata exposure | Page; customer notified within 72 h | `compensation_corrupt_total > 0`; `MissingOrgScope` bypass found |
+| 2 | Integrity of audit or compensation in doubt; cross-tenant metadata exposure | Page; customer notified within 72 h | `compensation_corrupt_total > 0`; tenant-less query reaching a multitenant resource |
 | 3 | Availability of the control plane; a data plane that cannot merge | Business hours; status page | Postgres failover; expired lease escalation |
 | 4 | Hardening finding with no exposure | Tracked issue | Dependency CVE without a reachable path |
 
-**Runbook: suspected row data leak to the control plane.** Detection: `validate_boundary_json()` raising (doc 12 §2.4), an Ecto embedded-schema rejection (doc 07 §8), `steward_plane_oversize_total` rising (doc 10 §5), or a `tools/logcheck` sentinel hit in production logs. Steps: (1) declare Sev 1; (2) identify the sender (`data_plane_id`, `changeset_id`) from the rejection log, which carries ids only; (3) confirm the rejection was total (a rejected insert or message is never partially stored); if a value reached a store, snapshot the partition and log stream, then purge; (4) find the cause (engine summary builder or a new message field) and fix it; (5) notify the customer with ids, field, and whether anything was persisted; (6) add the shape to the boundary test corpus (§12).
+**Runbook: suspected row data leak to the control plane.** Detection: `validate_boundary_json()` raising (doc 12 §2.4), an embedded Ash resource rejection (doc 07 §8), `steward_plane_oversize_total` rising (doc 10 §5), or a `tools/logcheck` sentinel hit in production logs. Steps: (1) declare Sev 1; (2) identify the sender (`data_plane_id`, `changeset_id`) from the rejection log, which carries ids only; (3) confirm the rejection was total (a rejected insert or message is never partially stored); if a value reached a store, snapshot the partition and log stream, then purge; (4) find the cause (engine summary builder or a new message field) and fix it; (5) notify the customer with ids, field, and whether anything was persisted; (6) add the shape to the boundary test corpus (§12).
 
 **Runbook: grant signing key compromise.** Rotate the ES256 pair with zero overlap, invalidating every outstanding grant (≤ 5 min of reviewer disruption); audit `row_delta.read` and `compensation.*` rows for the window and report to affected customers.
 
@@ -270,7 +270,7 @@ Resolving doc 03 §11's open question. Evidence records (doc 12 §8.8) carry `st
 
 ## Alternatives considered
 
-- **RLS in M0.** Rejected per doc 12 §10; the `prepare_query` guard plus tests gives the same guarantee for one connection role. Scheduled for M1 before the first enterprise review.
+- **RLS in M0.** Rejected per doc 12 §10; Ash attribute multitenancy plus the composite-FK rule and tests gives the same guarantee for one connection role. Scheduled for M1 before the first enterprise review.
 - **Control plane proxies row data for display under its own auth.** Rejected (doc 03 §2, doc 07 §2): one accidental log line would break the residency promise; the grant costs one browser fetch.
 - **Per-customer control planes.** Would remove §4.3's shared-infrastructure observations. Rejected: that is the single-plane cost structure doc 03 §10 rejected, without removing the data-plane deployment.
 - **Salted API-key hashes.** Rejected in §2.1: the secret is 256-bit random and the control plane cannot compute a per-data-plane salted hash it must push.

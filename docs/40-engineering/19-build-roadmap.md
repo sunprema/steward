@@ -38,6 +38,7 @@ The canonical list. "Later" means after M3 or unscheduled.
 | Queue ordering oldest-first, no priority bump | doc 07 §5.5 | M0; priority later |
 | Oban consumers `EnqueueQueueEntry`, `CountersFromEvent`, `NotifyPrincipal`, `AnalyticsExport`; NATS JetStream only when a consumer needs fan-out | doc 07 §5.7, doc 03 §4 | M0; NATS later |
 | GenServer-per-branch; switch to per-target partitioning at 500k branches/node or boot sweep > 60 s | doc 07 §4, §12 | M0; measure before M1 |
+| Control-plane domain layer is Ash 3 (resources, AshStateMachine, Reactor, AshOban, Ash.Policy, attribute multitenancy); REST hand-owned (not AshJsonApi); `events` hand-rolled (not AshEvents) | doc 07 §5.0, §11; doc 12 §0; doc 18 §2 | M0 |
 | RLS not in M0; additive migration later | doc 12 §10 | M1 (first enterprise review) |
 | Postgres adapter on Neon open-source storage; exported-snapshot/replica fallback supported, not default | doc 08 §5.1, §11 | M0 |
 | Iceberg, Snowflake, Salesforce adapters | doc 08 §0, §5.3 | M1 |
@@ -100,16 +101,17 @@ Sizes: S ≤ 1 engineer-week, M 1–3 weeks, L 3–6 weeks. Item IDs are stable 
 | J2 | Postgres adapter | doc 08 §5.1, §5.2, §5.4, §8 | Neon branch `openSnapshot` with ephemeral read-only role, `readRows`, `scanTableExpensive`, `currentRows`, `apply` with `steward.applied_rows`, 50k/10k chunking, schema-drift table, least-privilege grants | J1 | L |
 | J3 | Postgres fallback | doc 08 §11 | Exported-snapshot/replica mode with pinned LSN; snapshot age surfaced | J2 | M |
 | J4 | Conformance | doc 08 §10 | JUnit suite incl. apply-twice property; Testcontainers Postgres 16 + pageserver | J1 | M |
-| E1 | `control/` schema | doc 12 §1–2, §2.4, §2.5, §10, §11; doc 07 §4 | Umbrella (4 apps), Ecto schemas and forward-only migrations from the full DDL, enums, `validate_boundary_json`, append-only grants, `prepare_query` org scope, `mix steward.reasons.export` | C1 | L |
-| E2 | Branch coordinator | doc 07 §4, §5; doc 13 §2.1, §10 | Registry, `PartitionSupervisor`, `Branch` GenServer, `BootSweeper`, transition functions (`lock_version` + event + Oban in one tx), `TerminalProcessSweep` | E1 | L |
+| E1 | `control/` schema | doc 12 §0–2, §2.4, §2.5, §10, §11; doc 07 §4, §5.0 | Umbrella (4 apps), Ash 3 domains and resources for all doc 12 tables (M) in the five doc 07 §4 domains, `mix ash.codegen` forward-only migrations matching the full DDL plus hand-written fragments for enums, `validate_boundary_json`, append-only grants and partitions; attribute multitenancy on `org_id`; `AppendEvent` change; `mix steward.reasons.export` | C1 | L |
+| E1b | Authorization | doc 07 §5.0, §8; doc 15 §3.2 | `Ash.Policy` on every action from the doc 15 matrix, `ApiKey`/`Principal` actors, `PolicyCoverageTest` | E1 | S |
+| E2 | Branch coordinator | doc 07 §4, §5.0, §5; doc 13 §2.1, §10 | AshStateMachine branch lifecycle (S); Registry, `PartitionSupervisor`, `Branch` GenServer calling actions, `BootSweeper`, `TerminalProcessSweep`; Spark lifecycle DSL + generated matrix test (S) | E1 | L |
 | E3 | Session host | doc 07 §3.1, §5.3; doc 10 §5; doc 13 §6.8 | elixir-grpc `Session` on 50051 with mTLS, `Heartbeat.decide/3` (40 cells), `HeartbeatFlusher`, token bucket, instruction queue with reply deadlines and re-send | E2 | L |
-| E4 | Lifecycle flows | doc 13 §6.1, §6.3, §6.7; doc 07 §5.1, §5.2 | Create intent/commit, propose with compute and evaluation retry budgets, withdraw, abandon, TTL job, minute reconciliation job | E2, E3 | M |
+| E4 | Lifecycle flows | doc 13 §6.1, §6.3, §6.7; doc 07 §5.0, §5.1, §5.2 | Reactors for `CreateBranch`/`Propose`/`Merge`/`Revert`/`Abandon` (M) with compensable pre-checkpoint steps and `ReactorStepTest`; create intent/commit, propose with compute and evaluation retry budgets, withdraw, abandon; TTL and minute reconciliation as AshOban scheduled actions (`Merge` and `Revert` reactor bodies land in E6/E7) | E2, E3 | M |
 | E5 | Policy engine | doc 06 §4, §5, §8 | YAML parse, scope filter, versions and lifecycle, `policy_admin` gate, combination `block > hold > auto-merge`, verdict insert, `ReevaluateJob`, test harness over R6, `record_review_features/1`, CI mirror | E1, R6 | L |
-| E6 | Merge | doc 07 §5.4; doc 13 §6.5, §7 | Lease acquire/renew/release SQL, `StartMerge`, `MergeOutcome` handling, `stale_base` recompute, `merge_wait` ordering, `ExpiredLeaseScan`, `merge.stalled` | E3, E4 | M |
-| E7 | Revert | doc 13 §6.6; doc 07 §5.2; doc 12 §4 | `POST /merges/{id}/revert`, auto-propose, `revert_conflict` floor, `reverts` and `compensation_records_meta` mirror, `SetRetention`/`SetLegalHold` delivery | E6 | M |
-| E8 | Queue and reviews | doc 07 §5.5, §5.7, §5.8 | `queue_entries` consumer, `Reviews.decide/4` with `already_reviewed`/`changeset_superseded`/`verdict_block`/`self_approval`, counters and `CounterDrain`, events consumers | E4 | M |
-| E9 | LiveView UI | doc 07 §5.6 | Queue (keyset, PubSub), changeset detail with grant-fetched row delta hook, policy list/editor/test runner, target settings, audit log | E5, E8, R10 | L |
-| E10 | REST API | doc 10 §2, §3, §4 | Every §4 endpoint, idempotency store, rate limits, error envelope, API keys, memberships, OIDC via `ueberauth`, `stwt_` tokens | E4–E8 | L |
+| E6 | Merge | doc 07 §5.0, §5.4; doc 13 §6.5, §7 | `Merge` reactor body, lease acquire/renew/release actions, `StartMerge`, `MergeOutcome` handling, `stale_base` recompute, `merge_wait` ordering, `ExpiredLeaseScan`, `merge.stalled` | E3, E4 | M |
+| E7 | Revert | doc 13 §6.6; doc 07 §5.0, §5.2; doc 12 §4 | `Revert` reactor body, `POST /merges/{id}/revert`, auto-propose, `revert_conflict` floor, `reverts` and `compensation_records_meta` mirror, `SetRetention`/`SetLegalHold` delivery | E6 | M |
+| E8 | Queue and reviews | doc 07 §5.5, §5.7, §5.8 | `queue_entries` consumer, `Review.decide` action with `already_reviewed`/`changeset_superseded`/`verdict_block`/`self_approval`, counters and `CounterDrain`, events consumers | E4 | M |
+| E9 | LiveView UI | doc 07 §5.6 | AshPhoenix forms; queue (keyset, PubSub), changeset detail with grant-fetched row delta hook, policy list/editor/test runner, target settings, audit log | E5, E8, R10 | L |
+| E10 | REST API | doc 10 §2, §3, §4 | Every §4 endpoint as a thin controller over one Ash action, `Ash.Error` → error-envelope mapping, idempotency store, rate limits, error envelope, API keys, memberships, OIDC via `ueberauth`, `stwt_` tokens | E4–E8 | L |
 | E11 | Webhooks | doc 10 §6; doc 12 §2.3 | Delivery consumer, HMAC signing, retry ladder, suspension | E10 | S |
 | E12 | Retention and export | doc 12 §9; doc 13 §9; doc 07 §5.7 | `RetentionJob` → `CloseOverlay` → `closed`, `IdempotencyPurge`, `AnalyticsExport` to the store chosen in §6 | E4 | M |
 | E13 | Fake data plane | doc 07 §10 | `fake_data_plane.ex` with scripted failures covering every doc 13 §6 row | C1 | M |
@@ -226,7 +228,8 @@ flowchart LR
     R4 --> R5[R5 sandbox + assertions] --> R6[R6 validate NIF]
     R4 --> R7[R7 staleness + compensation] --> R8[R8 compensation log] --> R9[R9 merge worker]
     R4 --> R10[R10 grant endpoint]
-    E1 --> E2[E2 coordinator] --> E3[E3 Session host + matrix] --> E4[E4 create/propose/abandon]
+    E1 --> E1b[E1b Ash policies] --> E10
+    E1 --> E2[E2 coordinator + state machine + lifecycle DSL] --> E3[E3 Session host + matrix] --> E4[E4 reactors: create/propose/abandon]
     E13[E13 fake data plane] -.-> E2
     E1 --> E5[E5 policy engine]
     R6 --> E5
@@ -257,7 +260,7 @@ Four tracks start on day one after C1 lands. Each track's first deliverable is t
 |---|---|---|---|---|
 | **Rust: proxy** | P1–P9, C6 | A proxy that answers `SELECT 1` and writes to an in-memory overlay, for the SDK and local stack | `steward-overlay` crate API (R1, week 2); adapter host stub answering `OpenSnapshot`/`OpenSnapshotConnection` with a plain Postgres (J1, week 2); engine stub for `ProxyFacts` (R3) | P4 done → engine integration test on a real overlay; P8 done → first heartbeat round trip with E3 |
 | **Rust: engine** | R1–R11 | `steward-overlay` crate (first, blocks P4); a `steward-engine` that heartbeats a fixed branch set so E3 can be exercised; a `ComputeChangeset` that returns a fixture `ChangesetReport` for E5 | Adapter host stub for `ReadSnapshotRows`/`ReadCurrentRows` over Testcontainers Postgres (J1/J4); fake Session server (E13's gRPC side, or a `tonic` test server inside `engine/tests`) | R4 done → golden changesets from C3 agreed with E5; R8 done → scenario 3 can be attempted |
-| **Elixir: control plane** | E1–E13 | E13 fake data plane (first, so the control plane never waits on Rust); a fake `Session` *server* the Rust team can dial; OpenAPI-conformant API with fixture verdicts for S1 | `validate` NIF (R6; until then a stub NIF that parses but does not check relations); real `ChangesetReport` shapes from C1 | E3 done → real engine connects to real coordinator; E8 done → queue shows real `hold` verdicts |
+| **Elixir: control plane** (Ash 3 domain layer, doc 07 §5.0: resources and policies first, then state machine and reactors on top) | E1–E13 | E13 fake data plane (first, so the control plane never waits on Rust); a fake `Session` *server* the Rust team can dial; OpenAPI-conformant API with fixture verdicts for S1 | `validate` NIF (R6; until then a stub NIF that parses but does not check relations); real `ChangesetReport` shapes from C1 | E3 done → real engine connects to real coordinator; E8 done → queue shows real `hold` verdicts |
 | **Java: adapters** | J1–J5 | Host stub serving a plain Postgres `REPEATABLE READ` snapshot as `TRUE_SNAPSHOT` (the doc 08 §11 fallback shape) so proxy and engine integrate before Neon lands | Rust test client in `proxy/` for the gRPC surface (doc 08 §10) | J2 on Neon done → local stack switches its default sample target to the pageserver; J3 keeps the fallback path tested |
 | **Cross: contracts, stack, SDK** | C1–C5, S1–S4, D1 | C1 on day one; `tools/stack up` with stubs by week 3; fixtures (C3) for every team's golden tests | Everything above, in stub form | C4 with real components → C5 scenarios run → D1 deploys the same compose shape as a pod |
 
@@ -277,6 +280,7 @@ Pulled from every doc's open-questions table where "Needed by" is before or duri
 | 6 | Multi-region data planes at M0? | doc 03 §11 | Founding team | No; one region per customer; M3 |
 | 7 | Monorepo build orchestration | doc 18 §9 | Founding team | Per-directory native builds wired by a top-level script (C2); Bazel/Nx only if cross-language caching becomes the bottleneck |
 | 8 | Rust edition 2024 on the pinned toolchain | doc 18 §9 | Proxy lead | Pin the stable toolchain that supports it; confirm in C2 |
+| 8a | Ash 3 version pin and AshStateMachine/Reactor compatibility matrix | doc 07 §5.0, doc 18 §2 | Control plane lead | Latest stable at M0 start; pin in `mix.lock`; AshPostgres, AshStateMachine, AshOban, AshPhoenix and Reactor pinned to the versions that resolve together on that day and bumped only as one change |
 | 9 | Prepared statements: SQL-level `PREPARE`/`EXECUTE` in M0? | doc 04 §12 | Proxy lead | Extended-protocol statements yes; SQL-level `PREPARE` rejected `SD005` in M0; M3-P2 |
 | 10 | Tables without a primary key | doc 04 §12, doc 05 §4.1 | Engine lead | Reject writes (`SD005`), as both docs assume |
 | 11 | Merged-read support envelope for M0 | doc 04 §12 | Proxy + engine leads | Single-table predicates and equi-joins on touched tables; everything else `SD005` with the function named; widen in M1-P2 |
