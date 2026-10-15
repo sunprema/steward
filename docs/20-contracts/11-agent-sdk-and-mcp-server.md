@@ -210,7 +210,7 @@ Retry policy for API calls: exponential backoff 0.5 s × 2ⁿ with full jitter, 
 
 After `stale_base`, `wait()` returns a changeset with `summary.conflicts_count > 0` and `verdict` at least `hold` (doc 13 §6.5); after reject-with-retry the branch is `open` again and `changeset.review.allow_retry` is `true` with `review.note` populated, which is how the reviewer note reaches the agent (doc 13 §5).
 
-**Webhook helper.** For long-lived agents, `client.webhooks.verify(headers, body) -> Event` validates the signature on events doc 10 defines for `changeset.evaluated`, `review.decided`, `merge.applied`, `branch.abandoned`, and returns a typed event with the changeset id; the agent then calls `get_changeset`. The SDK never runs a server.
+**Webhook helper.** For long-lived agents, `client.webhooks.verify(headers, body) -> Event` validates the signature on events doc 10 defines for `changeset.evaluated`, `review.recorded`, `merge.applied`, `branch.abandoned`, and returns a typed event with the changeset id; the agent then calls `get_changeset`. The SDK never runs a server.
 
 ## 6. Reverts and merges
 

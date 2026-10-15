@@ -40,17 +40,17 @@ All component specs follow the template in `10-components/_template.md`.
 
 | # | Document | Status | Purpose |
 |---|----------|--------|---------|
-| 14 | Deployment and infrastructure | Planned | Customer-cloud data plane, control plane, secrets |
-| 15 | Security and tenancy model | Planned | Residency, plane boundary, audit |
-| 16 | Observability and SLOs | Planned | Metrics, traces, the numbers that matter |
-| 17 | Testing strategy | Planned | Unit, integration, load, policy harness |
+| 14 | [Deployment and infrastructure](30-operations/14-deployment-and-infrastructure.md) | Draft | Customer-cloud data plane, control plane, secrets |
+| 15 | [Security and tenancy model](30-operations/15-security-and-tenancy-model.md) | Draft | Residency, plane boundary, audit |
+| 16 | [Observability and SLOs](30-operations/16-observability-and-slos.md) | Draft | Metrics, traces, the numbers that matter |
+| 17 | [Testing strategy](30-operations/17-testing-strategy.md) | Draft | Unit, integration, load, policy harness |
 
 ### 40 — Engineering
 
 | # | Document | Status | Purpose |
 |---|----------|--------|---------|
 | 18 | [Engineering conventions](40-engineering/18-engineering-conventions.md) | Draft | Per-language style, repo layout, agent decision rules |
-| 19 | Build roadmap | Planned | Milestones, dependency order, definition of done |
+| 19 | [Build roadmap](40-engineering/19-build-roadmap.md) | Draft | Milestones, dependency order, definition of done |
 
 ## Conventions for these documents
 

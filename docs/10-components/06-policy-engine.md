@@ -49,8 +49,8 @@ The policy engine is the control-plane component that turns a changeset into exa
 | Changeset engine `ComputeChangeset` (assertions folded in, results in `ChangesetReport`) and `RunAssertions` (re-evaluation only), doc 05 / doc 10 §5 | `Instruction` on the data-plane session stream (doc 10 §5), results reported on the same stream | Available most of the time; unreachable for minutes during a customer deploy. Latency dominated by DuckDB; budgeted in §7. Returns per-assertion `{assertion_id, status, count, sample_ref}` and nothing else |
 | Changeset engine `validate` (doc 05) | Rustler NIF, in-process, dirty scheduler | Pure function over SQL text; no I/O; < 5 ms |
 | Changeset engine test mode (doc 05) | Rustler NIF, in-memory DuckDB over fixture Parquet | Used only for policy tests with synthetic fixtures (doc 18 §7); never touches a target |
-| Metadata Postgres (doc 12) | Ecto | Source of truth for everything in §4; strongly consistent |
-| Oban | Ecto | At-least-once; every job idempotent (doc 03 §7 principle 1) |
+| Metadata Postgres (doc 12) | Ash actions (AshPostgres, Ecto underneath) | Source of truth for everything in §4; strongly consistent |
+| Oban | AshOban (same Repo) | At-least-once; every job idempotent (doc 03 §7 principle 1) |
 
 The policy engine never calls an adapter, the write proxy, or the target.
 
@@ -216,8 +216,9 @@ sequenceDiagram
     PE->>PG: 1. load changeset summary, branch principal, proposed_at; existing verdict?
     PE->>PG: 2. load active policy versions for target
     PE->>PE: 3. scope filter → applicable versions (may be empty)
-    PE->>CE: 4. ComputeChangeset carries [{assertion_id, sql, expect}], budget (RunAssertions on re-evaluation)
-    CE-->>PE: 5. ChangesetReport.assertion_results {assertion_id, status, count, denominator, sample_ref, error_code}
+    PE-->>BC: 4. applicable assertion set [{assertion_id, sql, expect}], budget
+    BC->>CE: 4'. ComputeChangeset carries the assertion set (RunAssertions on re-evaluation); sent by the branch coordinator GenServer (doc 07 §5.2)
+    CE-->>BC: 5. ChangesetReport.assertion_results {assertion_id, status, count, denominator, sample_ref, error_code}
     PE->>PE: 6. combine → outcome + reason
     PE->>PG: 7. tx: insert verdict + verdict_assertions (unique on changeset_id)
     PE-->>BC: {:ok, verdict}
@@ -229,7 +230,7 @@ sequenceDiagram
 
 **Decision:** default `hold` with reason `no_policy_coverage` for M0, flippable per target to `auto-merge`. Justification: doc 01 §10 counts an unreviewed changeset reaching production that policy should have held as an incident, and a target with no policy yet is exactly where the buyer has not said what is safe. Holding costs one human look; auto-merging an uncovered table on day one costs trust. A customer who has consciously decided a target is low-risk flips the setting. The queue UI **should** label these entries "no policy covers this change" and offer "create a policy from this changeset", which is the first step of the queue shrinking itself.
 
-**Step 4.** The assertions travel with the `ComputeChangeset` instruction (one per changeset, carrying every applicable assertion, with the data-plane budget (§7)) and their results come back in `ChangesetReport`; `RunAssertions` is used only for re-evaluation against an existing row delta (§5.3). The engine runs assertions concurrently as it sees fit and streams results as they finish. Sample keys for a failed assertion (up to 20 by default) are persisted in the data plane beside the row delta, keyed by `(changeset_id, assertion_id)`; the control plane receives only the `sample_ref`, and the queue UI fetches samples through the same short-lived grant used for the row delta (doc 03 §2). Keys are row data and do not cross the boundary.
+**Step 4.** The policy engine selects the applicable assertion set; the branch coordinator GenServer (doc 07 §5.2) sends the `ComputeChangeset` instruction (one per changeset, carrying every applicable assertion, with the data-plane budget (§7)) and their results come back in `ChangesetReport`, which the coordinator hands to the policy engine for step 6; `RunAssertions` is used only for re-evaluation against an existing row delta (§5.3). The engine runs assertions concurrently as it sees fit and streams results as they finish. Sample keys for a failed assertion (up to 20 by default) are persisted in the data plane beside the row delta, keyed by `(changeset_id, assertion_id)`; the control plane receives only the `sample_ref`, and the queue UI fetches samples through the same short-lived grant used for the row delta (doc 03 §2). Keys are row data and do not cross the boundary.
 
 **Step 6, combination.** Precedence is `block > hold > auto-merge`:
 
@@ -255,8 +256,10 @@ stateDiagram-v2
     retired --> [*]
 ```
 
+`Policy` and `PolicyVersion` are `AshStateMachine` resources in the `Steward.Policies` domain (doc 07 §5.0) with the transitions above declared literally; save, activate, retire and archive are Ash actions, and `activate` carries an `Ash.Policy` requiring `policy_admin` on the target, so the gate below is a declaration on the action rather than a check in the caller.
+
 - **Save** parses the YAML, runs the static check (§8) through the engine's `validate` NIF, records `referenced_relations`, assigns `version = max(version) + 1` for the policy, and stores the version in `draft`. Save never changes an `active` version; editing an active policy creates a new draft version. Save then runs the policy's tests against the new version (§5.5) and stores the result; failing tests do not prevent save, they prevent activation.
-- **Activate** requires the calling principal to hold the `policy_admin` capability on the target (doc 10 defines capabilities; doc 15 the audit). Preconditions: version is `draft`; static check recorded as passed; `tests_passed_at` is set for this version and the policy has at least one test (**Decision:** a policy with zero tests cannot be activated; a `block` policy with no test is a production incident waiting to happen, and one test is cheap). Effects, in one transaction: version → `active`, previous active version → `retired`, `policies.active_version_id` updated, re-evaluation job enqueued (§5.3). Activation is idempotent on the idempotency key.
+- **Activate** requires the calling principal to hold the `policy_admin` capability on the target (doc 10 defines capabilities; doc 15 the audit). Preconditions: version is `draft`; static check recorded as passed; `tests_passed_at` is set for this version and the policy has at least one test (**Decision:** a policy with zero tests cannot be activated; a `block` policy with no test is a production incident waiting to happen, and one test is cheap). Effects, in one transaction: version → `active`, previous active version → `retired`, `policies.active_version_id` updated, re-evaluation job enqueued (§5.3). Activation is idempotent on the idempotency key. When `target_settings.separate_approval = true` (default, doc 12) and the target has ≥ 2 `policy_admin`s, the activating principal **must** differ from the version's author (`saved_by`), else `409 policy_activation_refused`; this is the setting's M0 meaning (doc 15 §3.3).
 - **Retire** with no successor leaves the policy with no active version; also enqueues re-evaluation, since held changesets may now auto-merge.
 - Versions are never deleted. A policy may be archived (`archived_at`), which retires its active version.
 
@@ -309,7 +312,7 @@ The harness builds the `before`/`after`/`delta` relations in an in-memory DuckDB
 | Whole policy set exceeds the data-plane budget | Engine cancels remaining assertions, returns them as `error: budget_exceeded` | Same as above | Raise `assertion_budget_s` for the target or split policies |
 | Assertion references a dropped table or column | `error_code: unknown_relation` / `unknown_column` | `hold`, `policy_error`; policy shown as broken in the policy list with the error | Author saves a new version; static check against the current catalog catches it at save |
 | Assertion result shape mismatch (`true` returns 2 rows) | `error_code: bad_shape` | `hold`, `policy_error` | As above |
-| Metadata Postgres unavailable | Ecto error | `evaluate` returns `{:error, :unavailable}`; no API writes | Oban retry; API returns 503 |
+| Metadata Postgres unavailable | `Ash.Error.Unknown` wrapping the Ecto connection error | `evaluate` returns `{:error, :unavailable}`; no API writes | Oban retry; API returns 503 |
 | Verdict insert races with a retry | Unique violation on `changeset_id` | None | Load and return the existing verdict |
 | Re-evaluation job runs while a reviewer is deciding | Review tx fails `changeset_superseded` (doc 13 §6.4) | Reviewer sees the new changeset | None needed |
 | Policy YAML on disk (CI mirror) diverges from Postgres | CI job compares digests | CI fails | Regenerate mirror from Postgres via `mix steward.policies.export` |
@@ -338,7 +341,7 @@ The control plane does no SQL parsing or DuckDB work on the evaluate path; the 5
 - **Static check.** `validate` parses the statement with the `sqlparser` crate (DuckDB dialect) inside the engine crate and rejects anything that is not exactly one `SELECT` (with CTEs allowed); any relation outside `delta.*`, `before.*`, `after.*`, `summary.*`, `impact.*`; any table function other than an allowlisted set of aggregates and scalar functions; `ATTACH`, `COPY`, `PRAGMA`, `SET`, `INSTALL`, `LOAD`, `read_*`, and `glob`. The same function runs again in the data plane before execution so a tampered control plane cannot smuggle SQL past the sandbox. **Decision:** parsing lives in the engine crate and is reached from Elixir through the NIF rather than through an Elixir SQL parser, so the control plane and data plane use one parser and one allowlist.
 - **Authorisation.** Read and draft policies: any principal whose API key carries the scope `policy:read` / `policy:write` (these are API-key scopes in doc 10's `resource:verb` list, not membership capabilities). Activate and retire: the membership capability `policy_admin` (doc 07). Agents **must not** hold `policy:write` or `policy_admin` in M0 (an agent that can edit the policy that gates it is the failure mode the product exists to prevent); the capability model is doc 10's, the audit trail doc 15's.
 - **Trust boundary.** Downward: policy version ids and SQL bodies (customer-authored, no row data). Upward: assertion status, counts, denominators, error codes, sample refs. Sample keys never cross (§5.1).
-- **Never logged:** assertion result rows, sample keys, fixture rows from policy tests (synthetic, but the habit matters), target credentials. SQL text of assertions **may** be logged at debug level with the policy version id, because it is customer-authored policy, not customer row data; doc 15 confirms or overrides.
+- **Never logged:** assertion result rows, sample keys, fixture rows from policy tests (synthetic, but the habit matters), target credentials. Policy SQL text (assertions, impact queries) is **never** logged, at any level including debug (doc 15); logs carry the policy version id and assertion id only.
 
 ## 9. Observability
 
@@ -361,10 +364,10 @@ Traces: `evaluate` is one span with a child span for `ComputeChangeset` / `RunAs
 ## 10. Testing
 
 - **Unit (ExUnit):** YAML parsing and scope matching (property tests over principals and time windows across DST boundaries); verdict combination over every status matrix, including `block` with `policy_error`; lifecycle transitions and capability checks; idempotency of `evaluate` and `ReevaluateJob`.
-- **Policy test harness:** itself tested with a fixture suite under `control/test/policies/_harness/` covering every `expect` form, inserts/updates/deletes, joins to `before.*`, and the six worked examples in §4.2, each with a passing and a failing fixture.
+- **Policy test harness:** policy tests run through the `PolicyVersion.run_tests` Ash action in test mode (a fixture changeset instead of a data-plane `RunAssertions`), so the harness exercises the same action, policies and multitenancy the UI and CI use; itself tested with a fixture suite under `control/test/policies/_harness/` covering every `expect` form, inserts/updates/deletes, joins to `before.*`, and the six worked examples in §4.2, each with a passing and a failing fixture.
 - **Golden verdicts:** `tools/fixtures` generates synthetic changesets with agent write patterns (doc 03 §7 principle 9); their verdicts under a reference policy set are checked in as golden files and diffed in CI so a change to combination or scope logic is visible.
 - **Static validator fuzzing:** a `cargo fuzz` target in `engine/` feeds generated and mutated SQL to `validate`; any input that passes validation but references a non-allowlisted relation or function in the resulting AST, or that panics, fails the build. A corpus of known-bad statements (`COPY ... TO`, `read_csv`, `ATTACH`, nested CTE smuggling) is a regression suite.
-- **Integration (`control/tests/integration`):** `evaluate` against the local stack (doc 18 §8) with a real changeset engine; data plane killed mid-evaluation to verify `computing` is retained and retried; activation triggering re-evaluation and superseding.
+- **Integration (`control/test/integration`):** `evaluate` against the local stack (doc 18 §8) with a real changeset engine; data plane killed mid-evaluation to verify `computing` is retained and retried; activation triggering re-evaluation and superseding.
 - **Performance:** a benchmark that evaluates 1,000 changesets against 200 active policies and asserts the control-plane p99 budget.
 
 ## 11. Alternatives considered

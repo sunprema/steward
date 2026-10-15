@@ -47,7 +47,7 @@ flowchart TB
         BC[Branch coordinator<br/>one GenServer per branch]
         PE[Policy engine<br/>SQL assertions + YAML envelope]
         RQ[Review queue + LiveView UI]
-        MPG[(Metadata Postgres<br/>Ecto)]
+        MPG[(Metadata Postgres<br/>Ash / AshPostgres)]
         JQ[Job queue<br/>Oban]
         AN[(Analytics / billing store<br/>columnar, open question)]
     end
@@ -99,18 +99,18 @@ Each subsection says the language, what the component owns, and what it must nev
 Owns the REST and gRPC surface agents and SDKs call for non-query operations: create branch, attach rationale, propose, fetch verdict, list changesets. Authenticates principals. Never touches row data and never sits on the query path; an agent that only reads and writes through its connection string need not call the API until it proposes.
 
 ### Branch coordinator (control plane, Elixir) — doc 07
-One supervised GenServer per non-terminal branch (`open`, `proposed`, `merging`). Owns lifecycle transitions, schedules the heartbeat as a periodic self-message, and reconciles the data plane's reported state with Postgres. Process state is a cache of Postgres state and never holds anything that must survive a restart (doc 18 §2). Never calls a remote system while holding an Ecto transaction.
+One supervised GenServer per non-terminal branch (`open`, `proposed`, `merging`). Owns lifecycle transitions, schedules the heartbeat as a periodic self-message, and reconciles the data plane's reported state with Postgres. Process state is a cache of the Ash resource record and never holds anything that must survive a restart (doc 18 §2); every transition it drives is an Ash action on an `AshStateMachine` resource, and each checkpointed flow is one Reactor (doc 07 §5.0). Never calls a remote system while holding a database transaction.
 
 ### Policy engine (control plane, Elixir) — doc 06
-Owns policy storage, versioning, orchestration of evaluation, and the verdict. A policy is a YAML envelope (scope, outcome, version) around SQL assertions. The SQL assertions **must** execute in the data plane, run by the changeset engine against the changeset's row delta, summary, and impact layers, because the row delta never crosses the boundary; the data plane returns only each assertion's result (pass/fail and a count) to the control plane, which combines them into exactly one verdict per changeset. This split keeps doc 02's rule that policies are "SQL against the row delta and summary" while keeping row data local. The policy engine never reads evidence (doc 02: evidence is for humans) and never receives row data.
+Owns policy storage, versioning, orchestration of evaluation, and the verdict. A policy is a YAML envelope (scope, outcome, version) around SQL assertions. The SQL assertions **must** execute in the data plane, run by the changeset engine against the changeset's row delta, summary, and impact layers, because the row delta never crosses the boundary; the data plane returns only each assertion's result (pass/fail and a count) to the control plane, which combines them into exactly one verdict per changeset. This split keeps doc 02's rule that policies are "SQL against the row delta and summary" while keeping row data local. Policies and their versions are Ash resources whose lifecycle is an `AshStateMachine` and whose activation is an action gated by an `Ash.Policy` (doc 06 §5.2). The policy engine never reads evidence (doc 02: evidence is for humans) and never receives row data.
 
 ### Review queue and LiveView UI (control plane, Phoenix LiveView) — doc 07
-Owns the ordered list of held changesets per target, the approve/reject/edit actions, and the rendering of summary, impact, verdict reasons, and evidence. Reads pre-aggregated counters, never live `SUM`s. Never renders row data from control-plane storage; row-delta views come from the data plane under a short-lived grant.
+Owns the ordered list of held changesets per target, the approve/reject/edit actions, and the rendering of summary, impact, verdict reasons, and evidence. Reads pre-aggregated counters, never live `SUM`s; the queue is an Ash read-model resource and every decision is one Ash action behind an `AshPhoenix` form (doc 07 §5.5). Never renders row data from control-plane storage; row-delta views come from the data plane under a short-lived grant.
 
-### Metadata Postgres (control plane, Ecto) — doc 12
-The source of truth for every doc 02 entity, plus the deltas and totals tables for counters (§7, principle 6). Never on the query hot path; a data-plane query must succeed with this database unreachable.
+### Metadata Postgres (control plane, Ash resources over AshPostgres; Ecto underneath) — doc 12
+The source of truth for every doc 02 entity, each an Ash resource with migrations generated from it (doc 12 §0), plus the deltas and totals tables for counters (§7, principle 6). Never on the query hot path; a data-plane query must succeed with this database unreachable.
 
-### Job queue (control plane, Oban) — doc 07
+### Job queue (control plane, Oban via AshOban) — doc 07
 Owns every piece of control-plane work that must complete: changeset evaluation requests, counter drains, billing rollups, policy re-evaluation after a policy edit, heartbeat-triggered repairs. Fan-out to NATS JetStream is deferred until a job needs more than one consumer. Never used for anything the proxy waits on.
 
 ### Write proxy (data plane, Rust) — doc 04
@@ -172,7 +172,7 @@ These are adapted from Cloudflare's D1 control-plane write-up (blog.cloudflare.c
 2. **No centralised single-region component on the data-plane hot path.** The proxy answers every query from the routing store, overlay store, and adapter. If Steward's control plane is down, agents keep writing to branches; only proposing waits.
 3. **Routing metadata lives in a durable store the data plane owns.** The routing store is not a cache in front of Postgres. A purgeable cache would turn a control-plane blip into a thundering herd of refills, the metastable failure the D1 team describes. Postgres is the source of truth; it is simply never asked at query time.
 4. **Heartbeats are the reconciliation mechanism.** Each branch is an Elixir GenServer whose heartbeat is a periodic self-message with jitter. The data plane sends its state, the coordinator sends back the authoritative state, the data plane corrects itself. There is no separate repair job; the heartbeat is that job, and it runs whether or not anything failed.
-5. **Checkpoints, not distributed transactions.** Every flow in §6 names the one write after which it has happened. Nothing holds an Ecto transaction open while calling the data plane, an adapter, or a billing system. Steps after the checkpoint are best-effort and repaired by principle 4.
+5. **Checkpoints, not distributed transactions.** Every flow in §6 names the one write after which it has happened. Nothing holds a database transaction open while calling the data plane, an adapter, or a billing system. Steps after the checkpoint are best-effort and repaired by principle 4.
 6. **Pre-aggregate with a change log.** Per-customer counters (open branches, pending reviews, metered reviewed changesets) are rows in a deltas table, drained by an Oban job into a totals table that the queue header and the billing meter read. Never a `SUM` over all rows at read time; never a contended increment on one row per customer.
 7. **Right store per job.** Postgres for transactional metadata; a columnar store (ClickHouse or DuckDB over Parquet, open) for analytics and billing events; the data-plane routing store for routing; a local WAL for overlay durability with Parquet on object storage at rest. Nothing goes into Postgres only because it is already there.
 8. **Eventual consistency and queues where strong consistency is not needed.** Analytics, billing, policy re-evaluation, and overlay cleanup go through Oban and later NATS JetStream. The control plane's view of a branch may lag by one heartbeat interval, and the UI says "as of" rather than pretending otherwise. Only the checkpoint writes of §6 are strongly consistent.
@@ -201,6 +201,7 @@ All protobuf and OpenAPI definitions live in `contracts/` and are the only thing
 | Warehouse branching | Iceberg native branches and tags | — | Already the native primitive; Snowflake exposes it |
 | In-process diff and aggregation | DuckDB | Overlay layout, diff queries, impact query runner | DuckDB reads Parquet and computes summaries cheaply; the semantic layer on top is ours |
 | Wire protocol | pgwire crate, tokio | Branch resolution, routing, evidence capture | Protocol handling is solved; what the proxy does with a resolved branch is the product |
+| Domain layer | Ash framework (Ash 3: resources, AshStateMachine, Reactor, AshOban, Ash.Policy, multitenancy) | Domain actions, the lifecycle declarations, the reactors' steps, the event-append change | Declarative resources match the design's shape (row-shaped entities with declared lifecycles, a capability matrix, org-scoped everything, checkpointed sagas); reduces hand-written lifecycle code and makes the declarations testable by introspection (doc 07 §5.0) |
 | Review UI | Phoenix LiveView | Queue model, changeset rendering, policy authoring | No separate front-end stack until a doc proves LiveView cannot do it (doc 18 §2) |
 | Jobs and events | Oban, then NATS JetStream, Kafka only on customer demand | — | Postgres-backed queue is enough at M0 volumes and keeps the dependency count low |
 | Policy language | SQL with a YAML envelope | Evaluation harness, policy tests as data | Reviewers and DBAs already write SQL; a DSL would need teaching and tooling |
