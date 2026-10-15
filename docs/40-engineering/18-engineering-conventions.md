@@ -13,7 +13,11 @@ One monorepo. Each top-level directory is one deployable unit or one shared libr
 ```
 docs/        Design documents (see docs/README.md)
 proxy/       Write proxy — Rust, Cargo workspace
-engine/      Changeset engine — Rust crate, used by proxy and control via Rustler
+engine/      Changeset engine — Rust; `steward-engine` binary (separate data-plane
+             process, gRPC over Unix socket: changeset computation, merge worker,
+             compensation log) plus the shared `steward-overlay` crate linked into
+             proxy and engine (overlay WAL, `view()`); the Rustler NIF into control
+             is used ONLY for policy SQL static validation and policy tests
 control/     Control plane and review UI — Elixir/Phoenix umbrella
 adapters/    Data-plane connectors — Java, Gradle multi-project
 sdk/         python/, typescript/, mcp/

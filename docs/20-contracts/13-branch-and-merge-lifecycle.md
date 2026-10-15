@@ -25,6 +25,7 @@ stateDiagram-v2
     proposed --> abandoned : abandon / held-TTL expiry
     merging --> merged : merge applied
     merging --> proposed : merge failed before compensation checkpoint
+    merging --> abandoned : base snapshot lost (snapshot_lost)
     merged --> closed : retention window elapsed
     rejected --> closed : retention window elapsed
     abandoned --> closed : retention window elapsed
@@ -57,10 +58,11 @@ Every transition is initiated by the control plane writing the new state to the 
 | `proposed` → `abandoned` | Owning principal calls abandon; or held-changeset TTL expires | Branch is `proposed` and not `merging` | Queue entry removed; changeset `superseded` | Control plane |
 | `open` → `abandoned` | Owning principal calls abandon; or open-branch TTL expires | Branch is `open` | Routing entry removed; writes rejected by proxy on next heartbeat | Control plane |
 | `merging` → `merged` | Data plane reports merge `applied` | Merge row `pending`; compensation record persisted; every row confirmed by adapter | Merge row `applied`; target lease released; routing entry removed | Control plane, on report from data plane |
-| `merging` → `proposed` | Merge fails before compensation is persisted (`stale_base`, adapter unreachable past retry budget, snapshot gone) | Merge row `pending`, no compensation persisted | Merge row `failed`; target lease released; for `stale_base`, new changeset computed showing conflict rows | Control plane |
+| `merging` → `proposed` | Merge fails before compensation is persisted (`stale_base`, adapter unreachable past retry budget) | Merge row `pending`, no compensation persisted | Merge row `failed`; target lease released; for `stale_base`, new changeset computed showing conflict rows | Control plane |
+| `open`/`proposed`/`merging` → `abandoned` | Base snapshot lost (adapter `SNAPSHOT_LOST`, reported by heartbeat or by a failed compute/merge step) | Branch non-terminal; for `merging`, compensation not yet persisted | Reason `snapshot_lost`; merge row (if any) `failed`; lease released; changeset `superseded`; queue entry removed; principal notified | Control plane |
 | `merged`/`rejected`/`abandoned` → `closed` | Retention job | Retention window elapsed since terminal state; data plane confirmed overlay deleted | Overlay ID mapping marked released | Control plane |
 
-A branch in `merging` whose compensation record has been persisted **must not** return to `proposed`; it stays `merging` until apply is retried to completion (section 6.5). A branch **must not** move from a terminal state to any state other than `closed`.
+A branch in `merging` whose compensation record has been persisted **must not** return to `proposed`; it stays `merging` until apply is retried to completion (section 6.5). A lost base snapshot moves the branch to `abandoned` from any non-terminal state with reason `snapshot_lost`; it is never a reason for `merging → proposed`. A branch **must not** move from a terminal state to any state other than `closed`.
 
 ## 3. Changeset states
 
@@ -176,7 +178,7 @@ Failure analysis:
 
 1. Routing miss: proxy returns `branch_not_routable`; repaired by heartbeat (6.1 step 7).
 2. Overlay store write fails: proxy returns an error to the agent; the write is not in the overlay; the agent retries. Writes within one connection are applied in order; the proxy **must not** acknowledge a write it has not durably appended.
-3. Base snapshot unavailable (CoW branch dropped, Iceberg snapshot expired): reads fail with `base_snapshot_gone`; the proxy reports it in the next heartbeat; the control plane marks the branch `abandoned` with reason `base_snapshot_gone` and notifies the principal. Human repair: the principal creates a new branch.
+3. Base snapshot unavailable (CoW branch dropped, Iceberg snapshot expired; adapter error code `SNAPSHOT_LOST`): reads fail with `base_snapshot_gone`; the proxy reports it to the engine, which carries it in the next heartbeat; the control plane marks the branch `abandoned` with reason `snapshot_lost` and notifies the principal. Human repair: the principal creates a new branch.
 4. Evidence append fails: the write is still acknowledged (evidence is for humans, not for correctness) but the proxy increments an `evidence_gap` counter that the changeset carries, so reviewers see that evidence is incomplete.
 5. Proxy believes `open` but control plane has moved the branch to `abandoned` (TTL) within the last heartbeat interval: writes land in the overlay for up to ~30s, then the proxy learns the state and rejects further writes. These writes are harmless because an `abandoned` overlay is never merged.
 6. Proxy believes `open` but control plane has set `proposed` (a second SDK client proposed while the first is still writing): same window; writes that land after the control plane froze but before the proxy learned of it are excluded because the changeset engine reads the overlay up to a freeze marker that the proxy writes when it learns of the freeze. The engine **must** wait for the freeze marker before computing.
@@ -199,7 +201,7 @@ sequenceDiagram
     CE->>CE: 5. DuckDB: row delta, summary, impact
     CE->>CE: 6. persist row delta locally keyed by C1
     CE-->>CP: 7. {summary, impact, evidence refs, row_delta_digest}
-    CP->>PE: 8. evaluate policies vs summary + impact (+ delta queries via data plane)
+    CP->>PE: 8. run_assertions in data plane; combine per-assertion results into verdict
     PE-->>CP: verdict
     CP->>CP: 9. tx: C1=evaluated, verdict recorded — CHECKPOINT
     CP->>CP: 10. best-effort: enqueue (hold) / start merge (auto-merge) / set rejected (block)
@@ -208,7 +210,7 @@ sequenceDiagram
 
 **Checkpoint:** step 9, the verdict recorded against changeset C1 in metadata Postgres.
 
-Step 2 is synchronous so the agent's propose call reliably freezes writes, but if it times out the control plane proceeds; the proxy will learn `proposed` from its next heartbeat and write the freeze marker then. The engine blocks on the marker. Policies that need the row delta (doc 06) query it through the data plane; the row delta does not cross planes.
+Step 2 is synchronous so the agent's propose call reliably freezes writes, but if it times out the control plane proceeds; the proxy will learn `proposed` from its next heartbeat and write the freeze marker then. The engine blocks on the marker. At step 8, ALL assertions execute in the data plane via `run_assertions` (doc 05, doc 06); only per-assertion results (status, count, `sample_ref`) cross to the control plane, which combines them into the verdict. The row delta does not cross planes.
 
 Failure analysis:
 
@@ -230,8 +232,9 @@ sequenceDiagram
     participant DP as Data plane
 
     R->>CP: open queue entry for C1
-    CP->>DP: 1. fetch row delta page for C1 (on demand, served from data plane)
-    DP-->>R: rows (rendered in the customer's data plane UI frame or streamed through CP without persistence)
+    CP-->>R: 1. mint short-lived signed grant for C1 (doc 07 §5.6)
+    R->>DP: fetch row delta page for C1 directly, presenting the grant
+    DP-->>R: rows (never pass through the control plane)
     R->>CP: 2. decision {approve | reject(allow_retry) , idempotency_key}
     CP->>CP: 3. tx: review row written, queue entry removed, branch next state set — CHECKPOINT
     CP->>CP: 4. best-effort: start merge / notify principal / unfreeze (retry)
@@ -243,7 +246,7 @@ Reviews are permanent and attributed. A decision on a changeset that is no longe
 
 Failure analysis:
 
-1. Step 1 fails: reviewer sees summary and impact without rows and an error banner; decision is still possible but the UI **should** warn.
+1. Step 1 fails (grant not minted, or the browser's direct fetch from the data plane fails): reviewer sees summary and impact without rows and an error banner; decision is still possible but the UI **should** warn.
 2. Step 2 lost: reviewer retries; idempotency key dedupes.
 3. Step 3 fails: nothing recorded; reviewer retries.
 4. Step 4 fails: review is recorded. The same reconciliation job as 6.3 step 7 starts merges for `merging` branches with no merge row and unfreezes `open` branches on heartbeat. Repaired by job and heartbeat.
@@ -280,16 +283,16 @@ sequenceDiagram
 
 **Staleness check.** Before computing compensation, the data plane reads the current target rows for every key in the row delta (inserts: the key must not exist; updates and deletes: the row must exist) and compares them, column by column over the columns the delta touches plus the key, against the base snapshot's rows for the same keys. If any differ, the merge fails with `stale_base`. The control plane sets the merge `failed`, releases the lease, returns the branch to `proposed`, and the data plane computes a new changeset whose summary includes a `conflicts` section listing the keys that changed and the before/after values from the target (not from the overlay). The new changeset is re-evaluated by policy and the verdict **must** be at least `hold`. There is no three-way merge: the principal withdraws and retries on a new branch, or a reviewer rejects. For CRMs whose base snapshot is a timestamp, the check compares `last_modified` of each row to the snapshot timestamp in addition to column values; see section 12.
 
-**Partial application on non-transactional targets.** For Postgres and Snowflake the adapter applies the row delta in one transaction and step 9 is trivial. For Salesforce and HubSpot there is no transaction: the adapter **must** be idempotent per row, keyed by (merge ID, row key), using an external-ID field or a Steward-managed sidecar table where the target permits, and otherwise by re-reading the row before writing it. The data plane records per-row progress for M1 durably; a retry (after crash or rate limit) resumes from the last confirmed row. The merge is `applied` only when every row is confirmed by the adapter. Until then the merge is `pending` and the branch stays `merging`; the heartbeat carries `merge_progress` so the control plane and the UI can show "412 of 1,000 rows applied". Progress stalled past a configurable budget (default 1 hour) raises an alert for a human; the human **may** force a revert (compensation is already persisted, so revert is always possible, including for the applied subset) but **must not** mark the merge applied by hand.
+**Partial application on non-transactional targets.** For Postgres and Snowflake the adapter applies the row delta in one transaction when the delta fits (default threshold 50,000 rows), and step 9 is trivial; above that, it is chunked in 10,000-row transactions with per-chunk progress recorded, resumable by merge ID (doc 08 §5.2). For Salesforce and HubSpot there is no transaction: the adapter **must** be idempotent per row, keyed by (merge ID, row key), using an external-ID field or a Steward-managed sidecar table where the target permits, and otherwise by re-reading the row before writing it. The data plane records per-row progress for M1 durably; a retry (after crash or rate limit) resumes from the last confirmed row. The merge is `applied` only when every row is confirmed by the adapter. Until then the merge is `pending` and the branch stays `merging`; the heartbeat carries `merge_progress` so the control plane and the UI can show "412 of 1,000 rows applied". Progress stalled past a configurable budget (default 1 hour) raises an alert for a human; the human **may** force a revert (compensation is already persisted, so revert is always possible, including for the applied subset) but **must not** mark the merge applied by hand.
 
 Failure analysis:
 
 1. Step 1 fails (lease held by another merge): this merge waits (section 7).
 2. Step 2 fails: lease is released by expiry; nothing else happened; retried by job.
 3. Step 3 fails (data plane unreachable): merge stays `pending` with no data-plane work; the GenServer retries with the same M1 (nothing durable exists on the data plane yet, and M1 is only in Postgres) up to a budget, then marks M1 `failed`, releases the lease, returns branch to `proposed` with reason `data_plane_unreachable`, and alerts. Repaired by retry then human.
-4. Step 4–5 fail (adapter cannot read target; or `stale_base`): merge `failed`; branch to `proposed`; for `stale_base`, new changeset computed as described above.
+4. Step 4–5 fail (adapter cannot read target; or `stale_base`): merge `failed`; branch to `proposed`; for `stale_base`, new changeset computed as described above. If the failure is `SNAPSHOT_LOST`, the branch goes to `abandoned` with reason `snapshot_lost` instead (section 2.1).
 5. Step 6 fails: no compensation; same as 4 with reason `compensation_failed`. A merge **must never** proceed without compensation.
-6. Step 7 fails (compensation log write fails): same as 5. If the write actually succeeded but the acknowledgement was lost, the next attempt with the same M1 finds the record and continues; with a fresh M1 the orphaned record is harmless and is GC'd as an unreferenced compensation record after retention.
+6. Step 7 fails (compensation log write fails): same as 5. If the write actually succeeded but the acknowledgement was lost, the next attempt with the same M1 finds the record and continues; with a fresh M1 the orphaned record is harmless and is GC'd as an orphaned compensation record (no merge checkpoint) after 7 days (section 9).
 7. Step 8–9 fail (adapter error, crash, rate limit): compensation persisted, so the merge is committed. Data plane retries apply from recorded progress. Heartbeat reports `merge_progress`. Repaired by retry; human alerted if stalled.
 8. Step 10 lost: merge is applied on the data plane but the control plane still shows `merging`. Heartbeat reports `(believed=merging, merge_progress=complete)`; control plane transitions to `merged`. Repaired by heartbeat.
 9. Step 11 fails: same as 8; the heartbeat keeps reporting until acknowledged.
@@ -318,7 +321,7 @@ sequenceDiagram
 
 **Checkpoint:** step 5, the revert branch row written with `revert_of = M1`.
 
-A revert is a branch whose overlay is the inverse operations from M1's compensation record, taken against a base snapshot of the target now. It then goes through propose, policy, and merge exactly like any change. The changeset engine, when computing the changeset for a branch with `revert_of` set, additionally compares each inverse op's expected "current" value (the value M1 wrote) to the actual current target value; any key that differs was touched by a later merge or by an out-of-band write, and is listed in the `conflicts` section. If the conflicts section is non-empty the verdict **must** be at least `hold`, whatever the policies say. When B2 merges, M1 is marked `compensated`; a compensation record is used by at most one revert.
+A revert is a branch whose overlay is the inverse operations from M1's compensation record, taken against a base snapshot of the target now. It then goes through propose, policy, and merge exactly like any change. The changeset engine, when computing the changeset for a branch with `revert_of` set, additionally compares each inverse op's expected "current" value (the value M1 wrote) to the actual current target value; any key that differs was touched by a later merge or by an out-of-band write, and is listed in the `conflicts` section. If the conflicts section is non-empty the verdict **must** be at least `hold`, whatever the policies say; this floor is applied by the branch coordinator (doc 07) after the policy engine's verdict, with reason `revert_conflict`. When B2 merges, M1 is marked `compensated`; a compensation record is consumed by at most one *merged* revert, and a rejected or abandoned revert releases it (doc 09 §5.3).
 
 Failure analysis:
 
@@ -342,7 +345,7 @@ Failure analysis:
 
 ### 6.8 Heartbeat reconciliation
 
-Every ~30 seconds (with ±20% jitter so a data plane with many branches does not burst) each data-plane branch sends `{branch_id, overlay_id, believed_state, overlay_size, merge_progress?, evidence_gap?}` to the control plane. The control plane looks up `(branch_id, overlay_id)` together and answers `{authoritative_state, lease_renewed?, freeze: bool}`. The Branch GenServer records `last_heartbeat_at`. Lookup is by both IDs: a branch ID with a different overlay ID is `unknown`, which is how a retry's orphan dies.
+Every ~30 seconds (with ±20% jitter so a data plane with many branches does not burst) the changeset engine (`steward-engine`, doc 05), which holds merge progress and compensation status, sends for each data-plane branch `{branch_id, overlay_id, believed_state, overlay_size, merge_progress?, evidence_gap?, compensation_status?, revert_outcome?, retention_ack?}` to the control plane. The write proxy does not heartbeat; it reports its per-branch facts (overlay size, freeze acknowledged, evidence gap) to the engine over the local socket. `compensation_status` is the compensation record's index status for the branch's merge (doc 09 §4); `revert_outcome` is set for revert branches (`merged`, `rejected`, `abandoned`) so the compensation record is consumed or released (doc 09 §5.3); `retention_ack` acknowledges the `retention_until` and legal-hold instructions last received. The control plane looks up `(branch_id, overlay_id)` together and answers `{authoritative_state, lease_renewed?, freeze: bool, retention_until?, legal_hold?}`. The Branch GenServer records `last_heartbeat_at`. Lookup is by both IDs: a branch ID with a different overlay ID is `unknown`, which is how a retry's orphan dies.
 
 Data-plane believed states are `open`, `proposed` (frozen), `merging`, `done` (data plane finished apply or was told terminal), and `dead` (marked for GC). The control plane's authoritative states are the seven branch states plus `unknown`.
 
@@ -390,12 +393,12 @@ The merge ID is the identifier that makes the adapter apply idempotent: an adapt
 | Data | Default retention | Configurable | Rule |
 |------|-------------------|--------------|------|
 | Overlay after terminal state (`merged`, `rejected`, `abandoned`) | 7 days | Per target | Retention job moves branch to `closed` once data plane confirms deletion |
-| Compensation record | 90 days | Per target | **Must never** be GC'd while its merge could still be reverted under the target's revert policy; a target with a longer revert window extends compensation retention to match |
+| Compensation record | 90 days | Per target | `retention_until` is set per record by the control plane from the target's policy (at merge time and whenever the policy changes) and delivered to the data plane, which only enforces it and never derives it locally. **Must never** be GC'd while its merge could still be reverted under the target's revert policy; a target with a longer revert window extends compensation retention to match |
 | Evidence | Same as compensation | Follows compensation | GC'd together with the compensation record of the merge it supports; for unmerged branches, with the overlay |
 | Changeset summary and impact | Indefinite (metadata) | No | Small; the audit trail |
 | Row delta | Same as overlay | Per target | Lives in data plane beside overlay |
 | Idempotency keys | 24 hours | No | |
-| Orphaned compensation records (merge ID with no `applied` merge) | 7 days | No | From 6.5 failure 6 |
+| Orphaned compensation records (no merge checkpoint: merge ID with no `applied` merge) | 7 days | No | From 6.5 failure 6; GC'd by the data plane |
 
 GC runs in the data plane, driven by `closed` transitions from the control plane and by local retention timers for compensation and evidence. The data plane **must not** delete an overlay while its branch is non-terminal; it checks the authoritative state in the heartbeat reply before deleting.
 

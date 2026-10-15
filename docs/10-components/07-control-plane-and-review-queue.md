@@ -112,20 +112,20 @@ The API controller calls `Branches.create_intent/2` (tx 1), then `steward_coordi
 
 ### 5.2 Propose (doc 13 §6.3)
 
-Tx at step 1 is `Branches.propose/3`; the GenServer owns steps 2–8 as a sequence of `handle_continue` calls with a retry budget (compute: 3 attempts over 5 minutes; policy evaluation: 3 attempts). Step 9 is `Changesets.record_verdict/3`, the checkpoint, which inserts the `changeset.evaluated` event and in the same transaction inserts Oban jobs: `EnqueueQueueEntry` (hold), `StartMerge` (auto-merge) or `RejectBranch` (block). Doc 13 §6.3 failure 7's reconciliation job runs every minute and is the belt-and-braces.
+Tx at step 1 is `Branches.propose/3`; the GenServer owns steps 2–8 as a sequence of `handle_continue` calls with a retry budget (compute: 3 attempts over 5 minutes; policy evaluation: 3 attempts). Before step 9, the coordinator applies the revert conflict floor: for a branch with `revert_of` set whose changeset has a non-empty `conflicts` section (or `partial_keys`), a verdict of `auto-merge` is raised to `hold` with reason `revert_conflict` (doc 13 §6.6); this rule lives here, not in the policy engine (doc 06). Step 9 is `Changesets.record_verdict/3`, the checkpoint, which inserts the `changeset.evaluated` event and in the same transaction inserts Oban jobs: `EnqueueQueueEntry` (hold), `StartMerge` (auto-merge) or `RejectBranch` (block). Doc 13 §6.3 failure 7's reconciliation job runs every minute and is the belt-and-braces.
 
 ### 5.3 Heartbeat (doc 13 §6.8)
 
 ```mermaid
 sequenceDiagram
-    participant DP as Data plane
+    participant DP as Data plane (steward-engine)
     participant G as gRPC Heartbeat service
     participant R as Registry
     participant B as Branch GenServer
     participant PG as Postgres
     participant F as HeartbeatFlusher
 
-    DP->>G: Heartbeat{branch_id, overlay_id, believed, overlay_size, merge_progress?}
+    DP->>G: Heartbeat{branch_id, overlay_id, believed, overlay_size, merge_progress?, compensation_status?, revert_outcome?, retention_ack?}
     G->>G: 1. rate limit per data-plane identity
     G->>R: 2. lookup branch_id
     alt pid found
@@ -144,10 +144,11 @@ sequenceDiagram
     F->>PG: every 5s: UPDATE branches SET last_heartbeat_at FROM unnest(...)
 ```
 
+- **Sender.** The heartbeat for a branch is sent by `steward-engine` (doc 05 §5.1, doc 13 §6.8), which holds merge progress and compensation status and folds in the proxy's per-branch facts; the proxy never heartbeats the control plane directly. `revert_outcome` and `compensation_status` drive the merge row's `compensated` transition; the reply carries `retention_until` and legal-hold instructions, which the engine acknowledges with `retention_ack` on the next heartbeat.
 - **Dispatch.** Registry lookup is the fast path. **Decision: a heartbeat for a non-terminal branch with no running GenServer starts the GenServer and then dispatches to it; a heartbeat for a terminal or unknown branch is answered straight from Postgres.** Terminal branches must have no process (§6 leak sweep), and starting one for them would recreate the leak.
 - **Matrix.** The GenServer implements doc 13 §6.8's table as a pure function `Heartbeat.decide(believed, authoritative, merge_progress) :: {reply, actions}`; actions are `:renew_lease`, `:advance_merged`, `:resend_merge`, `:alert`. Any `:alert` cell writes a `heartbeat.anomaly` event and pages (§9); it never auto-repairs, per doc 13.
 - **Cost.** `last_heartbeat_at` is recorded in process state and flushed by a per-node `HeartbeatFlusher` every 5 s in one batched `UPDATE`, so 3.3k heartbeats/s become ~1 statement per node per 5 s instead of 3.3k row updates/s. Lease renewal and `merge_progress` changes write immediately because they are transitions, not telemetry.
-- **Storms.** After a data-plane restart every branch heartbeats at once. The gRPC service holds a token bucket per data-plane identity sized at 3× that data plane's steady-state rate (`non_terminal_branches / 30 s`, minimum 100/s); over budget it answers `RESOURCE_EXHAUSTED` with `retry_after_ms` drawn uniformly from 0–30 s. Dropping a heartbeat is safe: the data plane keeps its last known state and no transition depends on a single heartbeat. Advice to the data plane (doc 04 **should**): on start, delay each branch's first heartbeat by a uniform random 0–30 s, then apply doc 13's ±20% jitter.
+- **Storms.** After a data-plane restart every branch heartbeats at once. The gRPC service holds a token bucket per data-plane identity sized at 3× that data plane's steady-state rate (`non_terminal_branches / 30 s`, minimum 100/s); over budget it answers `RESOURCE_EXHAUSTED` with `retry_after_ms` drawn uniformly from 0–30 s. Dropping a heartbeat is safe: the data plane keeps its last known state and no transition depends on a single heartbeat. Advice to the data plane (doc 05's `steward-engine` **should**): on start, delay each branch's first heartbeat by a uniform random 0–30 s, then apply doc 13's ±20% jitter.
 - **`heartbeat_lost`.** The Oban cron `HeartbeatLostScan` runs every minute: `UPDATE branches SET heartbeat_lost = true WHERE state IN (open, proposed, merging) AND last_heartbeat_at < now() - interval '5 minutes' AND NOT heartbeat_lost RETURNING id, state`, emits `branch.heartbeat_lost` events, and for `merging` rows raises an alert (doc 13 §6.8: the lease is held past expiry). The flag is cleared by the next heartbeat. The GenServer also has a 30 s ± 20% self-tick (doc 03 principle 4) that re-sends a pending merge instruction and retries routing adds; detection of loss is deliberately in the job, which works even when the GenServer is not running.
 
 ### 5.4 Merge lease (doc 13 §7)
@@ -263,4 +264,4 @@ Also emitted: `steward_genservers_total{state}` vs non-terminal rows; `steward_h
 | GenServer-per-branch ceiling: switch to per-target partitioning at 500k non-terminal branches per node or boot sweep > 60 s; needs doc 17's load test to confirm the memory estimate | Control plane lead | Before M1 scale target |
 | Analytics export destination: ClickHouse or Parquet-on-S3 (doc 03 §11); affects only `AnalyticsExport` | Architecture | Doc 12 |
 | Per-target `heartbeat_lost` threshold and lease interval for rate-limited CRM targets (doc 13 §12) | Control plane lead | Doc 08 |
-| Grant delivery: is a browser-direct fetch to the data plane acceptable to customers' network policies, or do we need the data-plane-hosted viewer frame doc 13 §6.4 mentions? | Founding team | Before M0 queue UI |
+| Grant delivery: is a browser-direct fetch to the data plane acceptable to customers' network policies, or do we need a data-plane-hosted viewer frame? Either way the control plane never proxies row data (doc 13 §6.4) | Founding team | Before M0 queue UI |

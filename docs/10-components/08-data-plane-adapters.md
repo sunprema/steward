@@ -21,7 +21,7 @@ Adapters are the only code in Steward that varies by target kind and the only co
 
 ## 2. Non-goals
 
-- **Compensation.** The merge worker in the data plane computes the inverse from the base snapshot and the row delta (doc 13 §6.5 steps 6–7) and writes the compensation log (doc 09). Adapters only supply the rows it needs. See §12 for the wording in docs 02/03 that suggests otherwise.
+- **Compensation.** The changeset engine in the data plane computes the inverse from the base snapshot and the row delta (doc 13 §6.5 steps 6–7) and writes the compensation log (doc 09). Adapters only supply the rows it needs (`readRows`, `currentRows`); docs 02 and 03 say the same.
 - **Branch lifecycle and state.** The adapter never knows what state a branch is in. The control plane (doc 07) owns transitions; the proxy's routing store (doc 04) owns the data-plane view.
 - **Routing and the overlay.** The proxy resolves connections and owns the overlay store (doc 04, doc 05). Adapters never read or write an overlay.
 - **Policy and impact queries.** The changeset engine (doc 05) runs them. An adapter may be asked for rows; it is never asked whether a change is acceptable.
@@ -115,7 +115,7 @@ public interface ProgressSink {
 
 | Code | Meaning | Retryable |
 |---|---|---|
-| `SNAPSHOT_LOST` | The snapshot handle no longer resolves (CoW branch GC'd, Iceberg snapshot expired, exported snapshot's transaction ended) | No; proxy reports `base_snapshot_gone` (doc 13 §6.2) |
+| `SNAPSHOT_LOST` | The snapshot handle no longer resolves (CoW branch GC'd, Iceberg snapshot expired, exported snapshot's transaction ended) | No; reported via heartbeat and the control plane abandons the branch with lifecycle reason `snapshot_lost` (doc 13 §2.1, §6.2) |
 | `STALE_BASE` | `currentRows` detected a row the base does not match; raised only by the merge worker's comparison, never by the adapter itself, but reserved here so the proto has it | No |
 | `RATE_LIMITED` | Target refused for quota; `retryAfter` populated | Yes, after `retryAfter` |
 | `PARTIAL_APPLY` | Apply returned with some rows unconfirmed; progress sink has the detail | Yes, resume with same merge ID |
@@ -202,7 +202,7 @@ sequenceDiagram
 
 Row-level idempotency: the write to `steward.applied_rows (merge_id, table_name, pk jsonb, applied_at)` is in the same transaction as the data write; the data statement joins against it so a row already present is skipped. Running `apply(M1, delta)` twice therefore yields the same target state, and the second run confirms every row without writing data. `SET LOCAL steward.merge_id` makes the merge ID visible to the customer's own audit triggers via `current_setting('steward.merge_id', true)`.
 
-Chunking: **Decision** — a delta under 50,000 rows applies in one transaction; above that, chunks of 10,000 rows each in its own transaction with a row in `steward.apply_progress`. Doc 13 §6.5 says "one transaction" for Postgres; the chunked path is an extension for deltas that would hold a long lock on an operational table, and it is only safe because compensation was persisted first and per-row idempotency makes the resume exact. Listed in §12.
+Chunking: **Decision** — a delta under 50,000 rows applies in one transaction; above that, chunks of 10,000 rows each in its own transaction with a row in `steward.apply_progress`. Doc 13 §6.5 records the same threshold; the chunked path exists for deltas that would hold a long lock on an operational table, and it is only safe because compensation was persisted first and per-row idempotency makes the resume exact.
 
 Failure analysis: schema check fails → `SCHEMA_MISMATCH` before any write; merge worker reports to the control plane, which treats it as a pre-checkpoint failure only if compensation is not yet persisted (it is persisted at step 7 before apply, so in practice this is a human escalation per doc 13 §6.5 "stalled"). Connection drops mid-transaction → the transaction rolls back; nothing applied; `TARGET_UNREACHABLE`; worker retries with M1. Crash mid-chunk → the committed chunks are in `applied_rows`; retry skips them. Pool exhausted → `POOL_EXHAUSTED`; retry.
 
@@ -244,7 +244,7 @@ Each registered target carries a **credential reference**, not a credential: a U
 
 | Failure | Detection | Impact | Recovery |
 |---|---|---|---|
-| CoW branch GC'd by the substrate (retention, operator action) | `readRows` / pass-through connect fails; mapped to `SNAPSHOT_LOST` | Branch reads fail; proxy reports `base_snapshot_gone` | Control plane abandons the branch (doc 13 §6.2 f3); principal creates a new one. Mitigate: host pins branches it owns with a substrate retention tag |
+| CoW branch GC'd by the substrate (retention, operator action) | `readRows` / pass-through connect fails; mapped to `SNAPSHOT_LOST` | Branch reads fail; reported in the heartbeat | Control plane abandons the branch with reason `snapshot_lost` (doc 13 §2.1, §6.2 f3); principal creates a new one. Mitigate: host pins branches it owns with a substrate retention tag |
 | Exported-snapshot fallback: holding connection dropped | Session gone | Same as above for every branch sharing that snapshot | Same; the fallback is weaker, §11 |
 | Iceberg snapshot expired by `expire_snapshots` | Catalog returns no such snapshot | `SNAPSHOT_LOST` | Host registers a tag `steward/<branch>` on open so expiry skips it; still lost if the tag is removed |
 | Salesforce daily API limit exhausted | `REQUEST_LIMIT_EXCEEDED` or pre-flight quota check | Apply stalls | `RATE_LIMITED` with `retryAfter` = quota reset; merge stays `pending`; heartbeat carries progress; doc 13 stall alert after 1 h unless `retryAfter` is later, in which case the alert says so |
@@ -351,9 +351,9 @@ Integration: `adapters/tests/integration` runs the host with all adapters under 
 | Question | Owner | Needed by |
 |---|---|---|
 | Confirm Neon open-source storage as the M0 substrate (§11), including the "Neon replica fed by logical replication" shape versus migrating the target onto Neon compute | Architecture | Before M0, with doc 04 |
-| Docs 02 §1 and 03 §4 say the adapter "produces the inverse of a write"; doc 13 §6.5 has the merge worker compute compensation from base snapshot plus row delta, and doc 03's component map draws adapters writing the compensation log. This spec follows doc 13 (adapters supply rows, never compensation). Amend docs 02/03 or this spec | Founding team | Before doc 09 |
-| Chunked apply for Postgres/Snowflake deltas over 50,000 rows (§5.2) departs from doc 13's "one transaction". Accept the threshold, or require single-transaction always | Adapters lead | Doc 13 amendment |
-| Pass-through reads require the proxy to hold a snapshot-scoped ephemeral credential (§5.1). Confirm this satisfies doc 03's "only adapters hold target credentials" | Architecture | Doc 15 |
+| Resolved: docs 02 §1 and 03 §4 now say adapters supply rows and the changeset engine computes compensation; doc 03's component map draws the engine writing the compensation log | Founding team | Done |
+| Resolved: doc 13 §6.5 now records the 50,000-row single-transaction threshold and 10,000-row chunking (§5.2) | Adapters lead | Done |
+| Resolved: doc 03 §4 and doc 04 §8 now say the proxy never holds *primary* target credentials and uses the adapter-minted ephemeral, read-only, snapshot-scoped credential for pass-through reads (§5.1) | Architecture | Done |
 | MySQL and BigQuery adapters: MySQL has no CoW substrate of comparable maturity (snapshot would be `TIMESTAMP_BOUNDED` via a paused replica); BigQuery has native time travel (7 days) and `MERGE`. Proposed order: BigQuery in M1 alongside Snowflake, MySQL in M2 | Founding team | Doc 19 |
 | HubSpot: no external-ID upsert on all objects and a per-10-second rate limit rather than a daily quota; needs its own checkpoint design. M2 | Adapters lead | Doc 19 |
 | Should the host run as a sidecar of the proxy pod in the customer's Kubernetes (shared network namespace, Unix socket trivially shared) or as its own Deployment (independent scaling and restart)? Recommendation: sidecar in M0, revisit when a data plane has more than ~20 targets | Proxy lead | Doc 14 |

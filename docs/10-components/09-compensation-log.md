@@ -333,6 +333,6 @@ Fixtures are synthetic only (doc 18 §7).
 | Customer-managed key integration per cloud (AWS KMS, GCP CMEK, Azure Key Vault) and how the Terraform module expresses it. | Infrastructure lead | Doc 14 |
 | Legal-hold API: per record, per target, or per time range; who may set it; whether object-store object lock is also applied. | Product + Control plane lead | Doc 10 |
 | Export format standardisation: is the Parquet-plus-signed-manifest bundle enough, or do auditors need CSV and a PDF summary? | Product | After first compliance customer |
-| Heartbeat and merge-outcome messages need new fields (`compensation` status/counts, `retention_until`, `legal_hold`, revert-branch outcomes). This is a `contracts/` change; doc 13 §6.8 and doc 10 should list them. | Control plane lead | Doc 10, doc 13 amendment |
+| Doc 13 §6.8 now lists the heartbeat fields `compensation_status`, `revert_outcome`, and `retention_ack`, with `retention_until` / legal hold in the reply; the heartbeat is sent by `steward-engine`, which hosts this module. Doc 10 must still define the protobuf in `contracts/`. | Control plane lead | Doc 10 |
 | Should `touches_revertable_merges` (§5.4) be computed for every proposed changeset or only on targets that opt in, given its cost scales with open revert windows? | Engine lead | Doc 05 |
 | Whether server-side checksum verification on PUT (where the object store offers it) may replace the full read-back in step 6 for large records. | Engine lead | After M0 benchmarks |

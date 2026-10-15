@@ -18,7 +18,7 @@ The write proxy is the data-plane component agents connect to. It speaks the tar
 - Learn the freeze on `proposed` (and every other non-`open` state), write the freeze marker into the overlay, and reject writes afterwards with a stable error.
 - Own the routing store: populate it from control-plane pushes and heartbeat replies, never purge it wholesale, and treat it as durable derived state (doc 03 §4, principle 3).
 - Capture evidence per statement into a local append-only log per branch, and carry the agent-supplied rationale from the session into that log.
-- Send the per-branch heartbeat (doc 13 §6.8) and adopt whatever authoritative state comes back.
+- Report per-branch facts (overlay size, freeze acknowledged, evidence gap, `base_snapshot_gone`) to `steward-engine` over the local socket; the engine sends the per-branch heartbeat (doc 13 §6.8) and relays the authoritative state, which the proxy adopts.
 - Emit the metrics in §9.
 
 ## 2. Non-goals
@@ -47,7 +47,7 @@ The write proxy is the data-plane component agents connect to. It speaks the tar
 
 **Agents, REST shim for Salesforce / HubSpot.** Not in M0; targeted with the CRM adapters. The agent calls a Steward endpoint shaped like the target's own REST API (e.g. `PATCH /services/data/vXX/sobjects/Account/<id>`), with the branch carried in a header `Steward-Branch: <branch_id>` and the API key as a bearer token. Each REST call maps to one classified statement; the same routing, freeze, overlay, and evidence paths apply.
 
-**Control plane, gRPC over mTLS (contracts in `contracts/`).** Three inbound calls only: `RoutingUpsert` (branch → overlay, base snapshot reference, credential reference, state, policy version), `Freeze` (doc 13 §6.3 step 2, synchronous with a short timeout), and `InitialiseOverlay` (doc 13 §6.1 step 2). None of these is on the query path. The heartbeat is outbound (§3.2).
+**Control plane, gRPC over mTLS (contracts in `contracts/`).** Three inbound calls only: `RoutingUpsert` (branch → overlay, base snapshot reference, credential reference, state, policy version), `Freeze` (doc 13 §6.3 step 2, synchronous with a short timeout), and `InitialiseOverlay` (doc 13 §6.1 step 2). None of these is on the query path. The heartbeat is sent by `steward-engine`, not the proxy; the engine relays heartbeat replies to the proxy over the local socket (§3.2, §5.6).
 
 ### 3.2 Outbound
 
@@ -57,10 +57,10 @@ The write proxy is the data-plane component agents connect to. It speaks the tar
 | Overlay store (per-branch write-ahead log on the data plane's persistent volume, rolled into Parquet segments on object storage per doc 05) | In-process append + `fsync` | p99 < 2 ms for the local append; object-storage roll is asynchronous and never on the ack path | Local volume must be available; object storage may be down for minutes without failing writes |
 | Evidence log (local append-only file per branch) | In-process append, batched fsync | < 1 ms | Best-effort; failure increments `evidence_gap` (doc 13 §6.2 failure 4) |
 | Adapter host (Java) | gRPC over a local Unix socket; one `SnapshotRead` stream per statement | p50 1 ms + target latency | Required for any read that touches the snapshot; absence fails reads, not overlay writes |
-| Changeset engine (DuckDB) | In-process crate call for M0 (doc 03 §11 leaves in-process versus sidecar open; the proxy assumes an interface, not a deployment) | 5–50 ms per merged read, estimate | Required for merged reads and for writes with a `WHERE` clause; absence fails those statements with a retryable error |
-| Control plane | gRPC heartbeat every ~30 s ± 20 % | Irrelevant to any query | **May be down indefinitely.** No query waits on it |
+| Changeset engine (`steward-engine`, DuckDB) | `view()` and the overlay WAL writer are in-process through the shared `steward-overlay` crate; everything else is gRPC over a local Unix socket to the separate `steward-engine` process (doc 05 §5.1), including the per-branch facts the engine folds into its heartbeat | 5–50 ms per merged read, estimate | Required for merged reads and for writes with a `WHERE` clause; absence fails those statements with a retryable error |
+| Control plane | None directly on the outbound side: the heartbeat is sent by `steward-engine`; the proxy only receives the inbound calls above | Irrelevant to any query | **May be down indefinitely.** No query waits on it |
 
-The proxy **must not** open a network connection outside the customer's cloud except the heartbeat and `contracts/`-defined control-plane calls.
+The proxy **must not** open a network connection outside the customer's cloud; the only cross-boundary traffic it sees is the inbound `contracts/`-defined control-plane calls above.
 
 ## 4. State
 
@@ -180,7 +180,7 @@ Per statement, after the response is sent, the proxy appends one record to the b
 
 ### 5.6 Heartbeat and routing-store maintenance
 
-One tokio task per proxy instance sends a heartbeat per routed branch at ~30 s ± 20 %, batched into one gRPC stream, carrying `{branch_id, overlay_id, believed_state, overlay_size, evidence_gap}` (merge progress is reported by the merge worker). The reply is applied to the routing store per the doc 13 §6.8 table. `unknown` and `closed` remove the row and schedule overlay GC; terminal states keep the row with `believed_state = done` until retention so a late connection gets `SD003` with the right reason rather than `SD002`. Heartbeat failure is a non-event for queries: the task logs, backs off to 60 s, and the routing store is untouched.
+The heartbeat to the control plane is sent by `steward-engine` (doc 13 §6.8), which holds merge progress and compensation status. One tokio task per proxy instance reports the proxy's per-branch facts for every routed branch, `{branch_id, overlay_id, believed_state, overlay_size, freeze_acknowledged, evidence_gap, base_snapshot_gone?}`, to the engine over the local Unix socket at ~30 s ± 20 %, and receives back the authoritative state the engine obtained from the control plane. The reply is applied to the routing store per the doc 13 §6.8 table. `unknown` and `closed` remove the row and schedule overlay GC; terminal states keep the row with `believed_state = done` until retention so a late connection gets `SD003` with the right reason rather than `SD002`. Engine or control-plane unavailability is a non-event for queries: the task logs, backs off to 60 s, and the routing store is untouched.
 
 ## 6. Failure modes
 
@@ -191,10 +191,10 @@ One tokio task per proxy instance sends a heartbeat per routed branch at ~30 s �
 | Overlay store unreachable (persistent volume gone or read-only) | Append returns error | Every write and `COMMIT` on every branch fails with `SD007`; reads continue | Writes are not acknowledged, so nothing is lost; the agent retries. Alert. Branch state is not affected |
 | Object-storage roll of overlay segments failing | Roll task error, `overlay_roll_lag_seconds` gauge | None on the query path; WAL grows | Retry with backoff; alert when lag > 15 min or WAL > ceiling |
 | Snapshot connection lost mid-transaction (adapter restarts, CoW branch dropped) | gRPC stream error from adapter | The current statement fails with `SD007` (retryable) or `SD004 base_snapshot_gone` (not retryable); an open transaction's buffer is kept so the agent can retry the statement; if `SD004`, the branch is reported in the next heartbeat and the control plane abandons it (doc 13 §6.2 failure 3) | Adapter host restarts and re-establishes the snapshot connection pool; for `SD004`, the principal creates a new branch |
-| Changeset engine (DuckDB) unavailable or over memory | Call error / `SD008` | Merged reads and `WHERE`-bearing writes fail with `SD007`; pass-through reads and key-only writes continue | Engine restarts; if in-process, the proxy restarts (§11 notes this as the cost of in-process) |
-| Control plane unreachable | Heartbeat task errors | **None.** Every query continues from local state. Freezes and unfreezes requested during the outage land when heartbeats resume | Nothing to do; heartbeat backs off and resumes |
+| Changeset engine (DuckDB) unavailable or over memory | Call error / `SD008` | Merged reads and `WHERE`-bearing writes fail with `SD007`; pass-through reads and key-only writes continue | `steward-engine` is a separate process (doc 05 §5.1); its supervisor restarts it and the proxy is unaffected |
+| Control plane unreachable | Engine reports no authoritative state in its replies | **None.** Every query continues from local state. Freezes and unfreezes requested during the outage land when the engine's heartbeats resume | Nothing to do; the engine's heartbeat backs off and resumes |
 | Proxy restart with open connections | Process exit | All sessions drop; open transaction buffers are lost and were never in the overlay; committed batches are durable. Drivers see a closed socket | Kubernetes restarts the pod; routing store is reopened; agents reconnect (the SDK retries). Target time to ready: < 5 s |
-| Evidence log append fails | I/O error | Write still acknowledged; `evidence_gap` incremented and carried in heartbeat | Alert; reviewer sees the gap on the changeset |
+| Evidence log append fails | I/O error | Write still acknowledged; `evidence_gap` incremented, reported to the engine, and carried in its heartbeat | Alert; reviewer sees the gap on the changeset |
 | Classification error (parser crash on valid SQL) | Panic caught per connection | That statement is rejected `SD006`; connection stays up | Bug; counter `statements_unclassifiable_total` alerts above zero |
 | Slow target (snapshot read takes seconds) | Latency histogram | Pass-through reads are slow; the proxy adds no timeout of its own beyond the driver's `statement_timeout` | None; this is the target's latency, reported as such |
 | Too many connections | Accept loop hits ceiling | New connections get `53300 too_many_connections` | Scale proxy replicas; connections are stateless across instances except open transactions |
@@ -222,7 +222,7 @@ Hot-path rule, stated exactly: for one statement the proxy reads (1) the per-con
 
 The proxy sits on the boundary between agents (untrusted, authenticated) and the customer's data plane (trusted). It authenticates principals by API key, hashed in the routing store with a per-deployment salt; keys are provisioned by the control plane through `RoutingUpsert` and revoked the same way. mTLS between agents and the proxy **may** be enabled in M0 and is off by default; TLS with server certificate is required by default (`sslmode=require` in the issued connection string). The control-plane gRPC link is mTLS always (doc 03 §8).
 
-The proxy never holds target credentials: a routing row carries a `credential_ref` the adapter host resolves (doc 03 §4). A compromised proxy process therefore yields overlays and evidence, not production access.
+The proxy never holds primary target credentials: a routing row carries a `credential_ref` the adapter host resolves (doc 03 §4). For pass-through reads it uses an ephemeral, read-only, snapshot-scoped credential minted by the adapter (doc 08 §5.1), which expires with the branch and grants nothing on the primary. A compromised proxy process therefore yields overlays, evidence, and read access to open branch snapshots, not production access.
 
 Never logged, at any level: statement text with literals, bind parameter values, result rows, API keys, `steward.rationale` values (they go to the evidence log, not to the process log), connection strings. Logs are structured JSON with branch ID, principal ID, statement class, fingerprint hash, timing, and error code (doc 18 §2, doc 15).
 

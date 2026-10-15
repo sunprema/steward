@@ -9,7 +9,8 @@ The changeset engine is the data-plane component that turns a branch's overlay p
 
 ## 1. Responsibilities
 
-- Define and own the overlay format: the Parquet segment schema, the manifest, the freeze marker, and compaction.
+- Define and own the overlay format: the local write-ahead log (the durable per-write checkpoint), the Parquet segment schema, the manifest, the freeze marker, the WAL-to-Parquet roll, and compaction.
+- Send the per-branch heartbeat to the control plane (doc 13 §6.8), folding in merge progress, compensation status, revert outcomes, retention acknowledgements, and the per-branch facts the proxy reports over the local socket; relay the authoritative state back to the proxy.
 - Compute the row delta from an overlay (net-op collapsing), persist it locally keyed by changeset ID, and serve it on demand inside the data plane.
 - Compute the summary layer and run registered impact queries to produce the impact layer; return both to the control plane.
 - Execute a policy version's SQL assertions against the changeset and return per-assertion results.
@@ -20,7 +21,7 @@ The changeset engine is the data-plane component that turns a branch's overlay p
 
 ## 2. Non-goals
 
-- Writing overlay segments on the query path: the write proxy (doc 04) appends them, using the writer from this component's shared crate.
+- Writing to the overlay on the query path: the write proxy (doc 04) appends to the WAL, using the writer from this component's shared crate; this component owns the format and the roll, not the hot-path append.
 - Reading base snapshots from targets directly: every base read goes through the adapter's snapshot interface (doc 08). The engine holds no target credentials.
 - Combining assertion results into a verdict, storing policies, or versioning them: policy engine (doc 06).
 - Applying a row delta, computing per-row apply progress, or holding the merge lease: adapters (doc 08) and the control plane (doc 07, doc 13 §7).
@@ -53,13 +54,14 @@ The engine is a separate process in the data plane (`steward-engine`, see §5.1 
 | Compensation log (doc 09) | In-process call in the same binary (§5.1) | Append is durable before it returns; that append is the merge checkpoint. |
 | Local disk | Segment cache, row delta store, DuckDB temp directory | Node-local NVMe or equivalent; losing it loses only caches and row deltas, which are recomputable from the overlay (doc 13 §6.3 failure 4). |
 
-The engine never calls the control plane. Results are returned in the RPC reply; the control plane retries a lost reply with the same changeset ID.
+The engine's only outbound call to the control plane is the per-branch heartbeat (doc 13 §6.8; gRPC over mTLS, ~30 s ± 20 %), which carries metadata only. Compute results are returned in the RPC reply; the control plane retries a lost reply with the same changeset ID.
 
 ## 4. State
 
 | State | Where | Durability | Role |
 |---|---|---|---|
-| Overlay segments and manifest | Object store, `steward/targets/<target_id>/overlays/<overlay_id>/tables/<table>/segments/seg-<first_seq>-<last_seq>.parquet`, `.../<overlay_id>/manifest.json` | Durable; the branch's only owned data (doc 02) | Source of truth for the branch's writes |
+| Overlay write-ahead log per branch | Data plane's persistent volume, appended and `fsync`'d by the proxy through the `steward-overlay` crate | Durable at `fsync`; this append is the write checkpoint (doc 13 §6.2) | Source of truth for writes not yet rolled |
+| Overlay segments and manifest | Object store, `steward/targets/<target_id>/overlays/<overlay_id>/tables/<table>/segments/seg-<first_seq>-<last_seq>.parquet`, `.../<overlay_id>/manifest.json` | Durable; the branch's only owned data (doc 02); the at-rest form | Source of truth for the branch's rolled writes |
 | Freeze marker | `.../<overlay_id>/freeze.json` = `{frozen_at, last_seq, proxy_instance}` written by the proxy | Durable | Upper bound on the sequence numbers a changeset includes (doc 13 §6.2 failure 6) |
 | Row delta per changeset | Local disk, `<data_dir>/changesets/<changeset_id>/<table>.parquet`, plus a digest | Derived; recomputable from the frozen overlay | Served to reviewers and the merge worker |
 | Assertion samples | Local disk beside the row delta, `<changeset_id>/assertions/<policy_id>/<assertion_id>.parquet` | Derived | Served under grant; never sent to the control plane (§5.4) |
@@ -84,7 +86,7 @@ One Parquet file set per overlay per table. Every segment has exactly this schem
 | `ts` | TIMESTAMP(MICROS, UTC), required | Proxy wall clock at append |
 | `stmt_id` | UTF8, required | Evidence correlation ID. Never the statement text |
 
-Writer settings: zstd level 3, row groups of 65,536 rows, column statistics on `seq`, `key_hash`, `ts`; a bloom filter on `key_hash`. The proxy flushes a segment at 10,000 ops, 16 MiB, 2 s idle, or on freeze. Segments are immutable once written. The manifest lists the live segments per table with their `[first_seq, last_seq]`, the table's schema fingerprint, and `compacted_through_seq`; it is updated by conditional PUT, so a stale writer loses and re-reads.
+Writer settings: zstd level 3, row groups of 65,536 rows, column statistics on `seq`, `key_hash`, `ts`; a bloom filter on `key_hash`. **The WAL and the roll.** The durable per-write checkpoint is a local fsync'd write-ahead log on the data plane's persistent volume, one per branch, whose record format is owned by the shared `steward-overlay` crate and written by the proxy; Parquet on object storage is the at-rest form. The crate rolls the WAL into Parquet segments asynchronously at a size or time threshold (10,000 ops, 16 MiB, 2 s idle, or on freeze), never on the acknowledgement path, and truncates the WAL only once the segment PUT and the manifest update have succeeded; `view()` and `ComputeChangeset` read the unrolled WAL tail together with the segments so no acknowledged write is ever invisible. Segments are immutable once written. The manifest lists the live segments per table with their `[first_seq, last_seq]`, the table's schema fingerprint, and `compacted_through_seq`; it is updated by conditional PUT, so a stale writer loses and re-reads.
 
 ### 4.2 Compaction
 
@@ -94,9 +96,9 @@ A table is compacted when it has more than 64 live segments or when live bytes e
 
 ### 5.1 Deployment shape
 
-**Decision:** the engine runs as its own process in the data plane, `steward-engine`, next to the proxy and the adapter host in one pod, speaking gRPC over a Unix domain socket (the "separate binary over a local socket" option of doc 03 §8). A shared Rust crate, `steward-overlay`, holds the segment schema, the writer, the net-op reader, and the `view()` relation; the proxy depends on it and opens its own small DuckDB instance for read-your-writes. The merge worker of doc 13 §6.5 and the compensation log writer of doc 09 are modules of the same binary (doc 09 may move the log's storage elsewhere; the write path stays here).
+**Decision:** the engine runs as its own process in the data plane, `steward-engine`, next to the proxy and the adapter host in one pod, speaking gRPC over a Unix domain socket (the "separate binary over a local socket" option of doc 03 §8). A shared Rust crate, `steward-overlay`, holds the segment schema, the writer, the net-op reader, and the `view()` relation; the proxy depends on it and opens its own small DuckDB instance for read-your-writes. The merge worker of doc 13 §6.5 and the compensation log writer of doc 09 are modules of the same binary (doc 09 may move the log's storage elsewhere; the write path stays here). Because this process holds merge progress and compensation status, it is also the sender of the per-branch heartbeat (doc 13 §6.8): the proxy reports its per-branch facts (overlay size, freeze acknowledged, evidence gap) to the engine over the local socket, and the engine relays the authoritative state back.
 
-Reason: a 10M-row changeset drives DuckDB to several GiB and can spill; a runaway impact query must be killable by process-level limits. Neither may take down the proxy, which must answer every query from local state (doc 03 §5). The latency cost is one local hop on a path that is already seconds long. Doc 18 §1 describes `engine/` as "used by proxy and control via Rustler"; that remains true of the `steward-overlay` crate and of the Rustler binding the control plane uses for policy tests against fixture changesets, but the computation itself is not in-process with either. Doc 18 §1 should be amended to say so.
+Reason: a 10M-row changeset drives DuckDB to several GiB and can spill; a runaway impact query must be killable by process-level limits. Neither may take down the proxy, which must answer every query from local state (doc 03 §5). The latency cost is one local hop on a path that is already seconds long. The Rustler NIF into the control plane (doc 18 §1) is used only for policy SQL static validation and policy tests against fixture changesets; the computation itself is not in-process with either the proxy or the control plane.
 
 ```mermaid
 flowchart LR
@@ -250,7 +252,7 @@ Because the inverse's `before` is exactly what M1 wrote, the revert changeset's 
 | Impact query or assertion runs away | Per-statement timer; DuckDB `memory_limit` | `interrupt()` after timeout; the statement reports `error`; others continue | Nothing to repair; the result is reported, never a pass |
 | Sandbox instance exceeds its memory cap | DuckDB out-of-memory error | That statement errors; the sandbox instance is dropped and recreated for the next statement | Same |
 | Whole computation exceeds the engine's memory ceiling | cgroup limit; process OOM-killed | The RPC fails; the proxy is unaffected (separate process) | Supervisor restarts the engine; control plane retries with the same ID; after the budget, `compute_failed` and an alert with the overlay size |
-| Base snapshot gone (substrate GC'd the CoW branch; Iceberg snapshot expired) | Adapter returns `base_snapshot_gone` | Computation fails `base_snapshot_gone`, non-retryable | Control plane marks the branch `abandoned` with reason `base_snapshot_gone` (doc 13 §6.2 failure 3). See §12 for the merge-time inconsistency in doc 13. |
+| Base snapshot gone (substrate GC'd the CoW branch; Iceberg snapshot expired) | Adapter returns `SNAPSHOT_LOST` | Computation fails `base_snapshot_gone`, non-retryable | Control plane marks the branch `abandoned` from any non-terminal state with reason `snapshot_lost` (doc 13 §2.1, §6.2 failure 3). |
 | Freeze marker never appears | 120 s poll exhausted | `freeze_marker_missing`, retryable | Heartbeat delivers `proposed` to the proxy, which writes the marker; control plane retries |
 | Adapter host down or slow | gRPC errors or per-batch timeout (60 s Postgres/Iceberg, 300 s CRM) | `adapter_unavailable`, retryable | Control plane retries; alert after budget |
 | Local disk full | Write errors on row delta, cache, or DuckDB temp | Computation fails `resource_exhausted` | Cache eviction runs; row deltas of `closed` branches purged; alert on free space < 10% |
@@ -335,8 +337,8 @@ The three signals on call looks at first: `engine_changeset_duration_seconds` p9
 | Before-image availability on targets without a real snapshot (CRMs with a timestamp base): the proxy reads the record before writing, but a concurrent edit between that read and the write is invisible; is "read before write" an acceptable before-image, and how is `invalid_before_images` surfaced in the queue? | Adapters lead | Doc 08 |
 | Large-object columns (bytea, CLOB, attachments): store full images in the overlay (cost) or a digest plus an out-of-line object (complexity for compensation)? Recommendation: digest in the image, full value in `.../<overlay_id>/blobs/<sha256>`, cap 64 MiB per value. | Engine lead | Doc 12 |
 | Schema drift between base snapshot and target at merge time (column added, type changed, column dropped): fail `stale_base` for the whole merge, or only when a touched column is affected? Recommendation: adapter reports `schema_changed`; merge fails to `proposed` with a schema conflict section; doc 04 refuses writes on an `open` branch once drift is detected. | Adapters lead, proxy lead | Doc 04, doc 08 |
-| Doc 13 §2.1 returns a `merging` branch to `proposed` when the snapshot is gone, but §6.2 abandons a branch whose snapshot is gone, and a `proposed` branch without a snapshot can never merge. Recommendation: amend §2.1 so `base_snapshot_gone` during merge (before the compensation checkpoint) moves the branch to `abandoned`. | Control plane lead | Doc 13 amendment |
+| Resolved: doc 13 §2.1 now moves a branch with a lost base snapshot to `abandoned` from any non-terminal state, reason `snapshot_lost` (adapter error code `SNAPSHOT_LOST`); it is no longer a reason for `merging → proposed`. | Control plane lead | Done |
 | Doc 13 invariant 9 versus the brief's `sample_keys` and §6.5's conflict before/after values in the summary: confirm the decision in §5.4 and §5.6 that keys and values stay in the data plane behind the grant. | Founding team | Doc 06, doc 10 |
 | Is the merge worker a module of `steward-engine` (as decided in §5.1) or its own process? | Proxy lead | Doc 09 |
-| Doc 02's open question on evidence shape (structured events or free-form log) lists doc 05 as the deadline; the engine treats evidence as opaque references, so the decision belongs to doc 04. Confirm reassignment. | Architecture | Doc 04 |
+| Resolved: doc 02 §7's open question on evidence shape (structured events or free-form log) is reassigned to doc 04; the engine treats evidence as opaque references. | Architecture | Doc 04 |
 | Per-target overrides for sandbox timeouts and memory caps (a Snowflake-backed `base.t` scan legitimately needs minutes). | Engine lead | Doc 14 |

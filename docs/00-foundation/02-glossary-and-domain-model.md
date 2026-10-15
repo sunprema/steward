@@ -12,7 +12,7 @@ The vocabulary of Steward and how the pieces relate. Every name in code, API, UI
 A production dataset that agents want to change: a Postgres database, a Snowflake schema, an Iceberg table, a Salesforce org. A target is registered once with Steward through an **adapter**. Steward never owns a target; it only mediates writes to it.
 
 ### Adapter
-The connector that lets Steward talk to one kind of target. An adapter knows how to read a snapshot, apply a changeset, and produce the inverse of a write. Adapters are the only code that varies by backend.
+The connector that lets Steward talk to one kind of target. An adapter knows how to read a snapshot and apply a changeset; it supplies rows (`readRows`, `currentRows`) and the changeset engine computes compensation from them. Adapters are the only code that varies by backend.
 
 ### Branch
 An isolated, short-lived overlay on a target. Reads fall through to the target as of the branch's **base snapshot**; writes land in the branch's **overlay**. A branch belongs to exactly one target and one **principal**. Branches are cheap enough to create one per agent task and are expected to live minutes to hours, not days.
@@ -56,7 +56,7 @@ Verdicts carry the list of policies that fired and why, so the reviewer and the 
 A human decision on a held changeset. One of **approve**, **reject**, or **edit** (approve a modified subset of the row delta). A review is attributed to a principal and is permanent. Approving does not bypass **block** verdicts.
 
 ### Review queue
-The ordered list of held changesets awaiting review for a target or a team. The queue is the primary human interface. Its size over time is a health metric: a shrinking queue means policies are capturing what humans decide.
+The ordered list of held changesets awaiting review for a target or a team. In M0 there is one queue per target; team-level queues are an open question (see §7). The queue is the primary human interface. Its size over time is a health metric: a shrinking queue means policies are capturing what humans decide.
 
 ### Merge
 Applying a changeset's row delta to the target through its adapter. A merge is atomic per target where the backend allows it, and **checkpointed** where it does not (doc 13). Every merge produces a **compensation record** before it is considered complete.
@@ -117,7 +117,7 @@ Key cardinalities:
 
 - A branch has at most one *current* changeset but keeps all prior ones.
 - A changeset has exactly one verdict; re-evaluation (after a policy change) produces a new changeset, not a new verdict on the old one.
-- A merge produces exactly one compensation record. A compensation record may be used by at most one revert.
+- A merge produces exactly one compensation record. A compensation record is consumed by at most one *merged* revert; a rejected or abandoned revert releases it.
 
 ## 4. State summaries
 
@@ -130,6 +130,8 @@ Full state machines are in doc 13. For reference:
 | Verdict | `auto-merge`, `hold`, `block` |
 | Review | `approved`, `rejected`, `edited` |
 | Merge | `pending`, `applied`, `compensated`, `failed` |
+
+The compensation record status `consumed` (doc 09) corresponds to merge state `compensated`; doc 12 formalises the mapping.
 
 ## 5. Naming rules
 
@@ -149,4 +151,4 @@ Adapter · Base snapshot · Branch · Changeset · Changeset engine · Checkpoin
 |----------|-------|-----------|
 | Do we need a **Team** entity (a group of principals who share a review queue) in M0, or is one queue per target enough? | Product | Doc 07 |
 | Is **edit** as a review outcome in M0, or do we ship approve/reject only and treat edit as "reject, agent retries"? | Product | Doc 13 |
-| Should evidence be structured (typed events) or a free-form log in M0? | Architecture | Doc 05 |
+| Should evidence be structured (typed events) or a free-form log in M0? | Architecture | Doc 04 |

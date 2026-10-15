@@ -20,12 +20,12 @@ All component specs follow the template in `10-components/_template.md`.
 
 | # | Document | Status | Purpose |
 |---|----------|--------|---------|
-| 04 | Write proxy | Planned | Rust; wire protocols, routing, branch resolution |
-| 05 | Changeset engine | Planned | Rust + DuckDB; overlay format, diff, impact metrics |
-| 06 | Policy engine | Planned | SQL-assertion policies, evaluation, outcomes |
-| 07 | Control plane and review queue | Planned | Elixir; branch lifecycle, heartbeats, LiveView UI |
-| 08 | Data-plane adapters | Planned | Java; Postgres, Snowflake/Iceberg, Salesforce |
-| 09 | Compensation log | Planned | Inverse writes, revert semantics, retention |
+| 04 | [Write proxy](10-components/04-write-proxy.md) | Draft | Rust; wire protocols, routing, branch resolution |
+| 05 | [Changeset engine](10-components/05-changeset-engine.md) | Draft | Rust + DuckDB; overlay format, diff, impact metrics |
+| 06 | [Policy engine](10-components/06-policy-engine.md) | Draft | SQL-assertion policies, evaluation, outcomes |
+| 07 | [Control plane and review queue](10-components/07-control-plane-and-review-queue.md) | Draft | Elixir; branch lifecycle, heartbeats, LiveView UI |
+| 08 | [Data-plane adapters](10-components/08-data-plane-adapters.md) | Draft | Java; Postgres, Snowflake/Iceberg, Salesforce |
+| 09 | [Compensation log](10-components/09-compensation-log.md) | Draft | Inverse writes, revert semantics, retention |
 
 ### 20 — Contracts
 
