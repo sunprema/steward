@@ -18,7 +18,7 @@ engine/      Changeset engine — Rust; `steward-engine` binary (separate data-p
              compensation log) plus the shared `steward-overlay` crate linked into
              proxy and engine (overlay WAL, `view()`); the Rustler NIF into control
              is used ONLY for policy SQL static validation and policy tests
-control/     Control plane and review UI — Elixir/Phoenix umbrella
+control/     Control plane and review UI — single Elixir/Phoenix app, namespaces enforced by `boundary`
 adapters/    Data-plane connectors — Java, Gradle multi-project
 sdk/         python/, typescript/, mcp/
 deploy/      helm/, terraform/

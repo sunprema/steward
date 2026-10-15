@@ -151,7 +151,7 @@ observability:
 
 | Workload | Shape | Sizing | Notes |
 |---|---|---|---|
-| `steward-control` (Phoenix release: `steward_web`, `steward_coordinator`, `steward_jobs`, `steward_core`; doc 07 §4) | Deployment, 3 replicas per region, PDB `minAvailable: 2`, topology spread across 3 AZs | 2 vCPU / 4 GiB each; doc 07 §4: 100k non-terminal branches ≈ 500 MB per node over three nodes | Readiness gate is the boot sweep (doc 07 §7: ≤ 15 s at 100k); liveness is a BEAM alive check |
+| `steward-control` (single Phoenix release; doc 07 §4) | Deployment, 3 replicas per region, PDB `minAvailable: 2`, topology spread across 3 AZs | 2 vCPU / 4 GiB each; doc 07 §4: 100k non-terminal branches ≈ 500 MB per node over three nodes | Readiness gate is the boot sweep (doc 07 §7: ≤ 15 s at 100k); liveness is a BEAM alive check |
 | Metadata Postgres | RDS PostgreSQL 16, `db.r6i.xlarge` (4 vCPU / 32 GiB), Multi-AZ synchronous standby, `gp3` 500 GiB at 6,000 IOPS | doc 07 §7's "4 vCPU / 32 GB / NVMe, synchronous replica" | Pools: 20 per node + Oban 10 (doc 07 §7), 3 nodes = 90 + migrator; `max_connections = 200`. **Decision: no read replica in M0.** The queue is a keyset-paginated read model and counters are pre-aggregated (doc 07 §5.5, §5.8), so reads are cheap; a replica would add replication lag to a UI that already says "as of" |
 | Analytics export destination | S3 bucket `steward-analytics-<region>`, Parquet per `(org_id, day)` (doc 12 §7), 13-month lifecycle | — | Store choice (ClickHouse vs Parquet) remains open per doc 12; the bucket exists either way because the Parquet files are the ClickHouse load source too |
 | gRPC ingress for `Session` | NLB, TCP passthrough on 443 → pod port 50051 | — | §3.1 |
