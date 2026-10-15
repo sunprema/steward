@@ -66,7 +66,7 @@ The proxy **must not** open a network connection outside the customer's cloud; t
 
 | State | Where | Durability | Kind |
 |---|---|---|---|
-| Routing store: one row per `(branch_id, overlay_id)` with `target_id`, `base_snapshot_ref`, `overlay_path`, `credential_ref`, `believed_state`, `frozen`, `policy_version`, `principal_id`, `updated_at`, `last_heartbeat_reply_at`; one row per principal API key hash → `principal_id` | SQLite, WAL mode, on the data plane's persistent volume | Durable; survives restarts; rows are removed only on an authoritative terminal state or `unknown` from the control plane, never by eviction | Derived, data-plane owned (doc 03 §4) |
+| Routing store: one row per `(branch_id, overlay_id)` with `target_id`, `base_snapshot_ref`, `overlay_path`, `credential_ref`, `believed_state`, `frozen`, `policy_version_set_hash` (doc 10 `RoutingUpsert`; the full version id list is fetched by the engine on `ComputeChangeset`), `principal_id`, `updated_at`, `last_heartbeat_reply_at`; one row per principal API key hash → `principal_id` | SQLite, WAL mode, on the data plane's persistent volume | Durable; survives restarts; rows are removed only on an authoritative terminal state or `unknown` from the control plane, never by eviction | Derived, data-plane owned (doc 03 §4) |
 | Overlay write-ahead log per branch, with write sequence numbers and the freeze marker | Persistent volume, rolled into Parquet by the engine | Durable at `fsync`; this append is the write checkpoint | Source of truth for row data on the branch |
 | Evidence log per branch | Persistent volume, append-only | Durable, best-effort | Source of truth for evidence |
 | Touched-table set per branch | Derived from the overlay; persisted in the routing store row as a JSON array for fast startup | Durable, rebuilt from the overlay on mismatch | Derived |
@@ -197,7 +197,7 @@ The heartbeat to the control plane is sent by `steward-engine` (doc 13 §6.8), w
 | Evidence log append fails | I/O error | Write still acknowledged; `evidence_gap` incremented, reported to the engine, and carried in its heartbeat | Alert; reviewer sees the gap on the changeset |
 | Classification error (parser crash on valid SQL) | Panic caught per connection | That statement is rejected `SD006`; connection stays up | Bug; counter `statements_unclassifiable_total` alerts above zero |
 | Slow target (snapshot read takes seconds) | Latency histogram | Pass-through reads are slow; the proxy adds no timeout of its own beyond the driver's `statement_timeout` | None; this is the target's latency, reported as such |
-| Too many connections | Accept loop hits ceiling | New connections get `53300 too_many_connections` | Scale proxy replicas; connections are stateless across instances except open transactions |
+| Too many connections | Accept loop hits ceiling | New connections get `53300 too_many_connections` | Raise `max_connections` / vertical resize in M0 (single-pod data plane, doc 14); multi-replica proxy is M1 (doc 19), and connections are stateless across instances except open transactions |
 
 ## 7. Performance and capacity
 
@@ -220,7 +220,7 @@ Hot-path rule, stated exactly: for one statement the proxy reads (1) the per-con
 
 ## 8. Security
 
-The proxy sits on the boundary between agents (untrusted, authenticated) and the customer's data plane (trusted). It authenticates principals by API key, hashed in the routing store with a per-deployment salt; keys are provisioned by the control plane through `RoutingUpsert` and revoked the same way. mTLS between agents and the proxy **may** be enabled in M0 and is off by default; TLS with server certificate is required by default (`sslmode=require` in the issued connection string). The control-plane gRPC link is mTLS always (doc 03 §8).
+The proxy sits on the boundary between agents (untrusted, authenticated) and the customer's data plane (trusted). It authenticates principals by API key, stored in the routing store as unsalted `SHA-256(secret)`, the same hash the control plane keeps (doc 15); keys are provisioned by the control plane through `RoutingUpsert` and revoked the same way. mTLS between agents and the proxy **may** be enabled in M0 and is off by default; TLS with server certificate is required by default (`sslmode=require` in the issued connection string). The control-plane gRPC link is mTLS always (doc 03 §8).
 
 The proxy never holds primary target credentials: a routing row carries a `credential_ref` the adapter host resolves (doc 03 §4). For pass-through reads it uses an ephemeral, read-only, snapshot-scoped credential minted by the adapter (doc 08 §5.1), which expires with the branch and grants nothing on the primary. A compromised proxy process therefore yields overlays, evidence, and read access to open branch snapshots, not production access.
 
@@ -230,7 +230,7 @@ SQL injection in the agent's own statements is not the proxy's concern: the agen
 
 ## 9. Observability
 
-Metrics, all labelled by `branch_id` and `target_id` unless noted:
+Metrics, all labelled by `target_id` unless noted; `branch_id` is never a metric label (doc 16): per-branch detail lives in logs and traces.
 
 - `proxy_statements_total{class, route, outcome}` — counter.
 - `proxy_statement_duration_seconds{class, route}` — histogram of added latency; the p99 of `{class="read", route="pass_through"}` is the §7 requirement.
@@ -251,7 +251,7 @@ The three signals on call looks at first: `proxy_statement_duration_seconds` p99
 - **pgwire conformance.** `proxy/tests/integration` runs a driver matrix against a proxy in front of a fixture Postgres: `psql`, psycopg3, asyncpg, SQLAlchemy (sync and async), JDBC, npgsql, node-postgres, Go `pgx`. Each driver runs the same script: connect, simple and extended queries, a transaction with savepoint, a frozen-branch write, a `SD002` reconnect loop. Adding a driver is a new directory, not new test logic.
 - **Statement classification property tests.** `proptest` generates SQL from a grammar covering the Postgres statement forms the parser knows, with random comments, whitespace, CTEs, and casing; the property is that classification equals the class of the AST's top-level node, and that every statement containing a data-modifying node anywhere is `write`. A corpus of real agent-generated SQL (synthetic, from `tools/fixtures`) is a regression set.
 - **Read-your-writes tests.** For a fixture table set: apply a random sequence of writes on a branch, then compare every read through the proxy against the same sequence applied to a scratch Postgres database. Any difference on a supported statement form is a failure; an unsupported form **must** produce `SD005`, not a wrong answer.
-- **Replay harness.** `tools/replay` feeds recorded agent sessions (statement sequences with timings, synthetic data) through the proxy and asserts overlay contents, evidence records, and latency histograms. This is also the load test required by doc 03 principle 9 and the benchmark gate of doc 18 §3.
+- **Replay harness.** `tools/loadgen replay` (the `replay` subcommand of the `tools/loadgen` load driver; `tools/fixtures` is the synthetic data generator) feeds recorded agent sessions (statement sequences with timings, synthetic data) through the proxy and asserts overlay contents, evidence records, and latency histograms. This is also the load test required by doc 03 principle 9 and the benchmark gate of doc 18 §3.
 - **Failure injection.** Integration tests kill the adapter host mid-transaction, make the overlay volume read-only, corrupt the routing store, and stop the control-plane stub, asserting the behaviour in §6.
 - **Benchmarks.** `proxy/benches/` covers connect, classify, pass-through read, single-row write, and merged read; CI fails on > 5 % regression.
 
@@ -270,7 +270,7 @@ The three signals on call looks at first: `proxy_statement_duration_seconds` p99
 
 | Question | Owner | Needed by |
 |---|---|---|
-| DDL support: should a branch be allowed to `ALTER TABLE` / `CREATE TABLE`, with the overlay carrying schema changes and the changeset showing them? Recommendation: not in M0; reject with `SD005` and measure how often agents hit it | Proxy lead, Product | Doc 19 (M1 scope) |
+| DDL support: should a branch be allowed to `ALTER TABLE` / `CREATE TABLE`, with the overlay carrying schema changes and the changeset showing them? Recommendation: not in M0; reject with `SD005` and measure how often agents hit it | Proxy lead, Product | M3 (doc 19) |
 | MySQL wire protocol timeline, and whether the MySQL front end shares the Postgres parser (dialect differences in classification) | Proxy lead | Doc 19 |
 | Prepared statements in M0: extended-protocol unnamed and named statements are supported as described; are SQL-level `PREPARE` / `EXECUTE` / `DEALLOCATE` in scope, and must named statements survive across a freeze? Recommendation: support `PREPARE`/`EXECUTE` by classifying at `PREPARE` time; otherwise reject | Proxy lead | Before M0 driver matrix |
 | Exact merged-read support envelope for M0 (which Postgres functions, types, and join shapes DuckDB must cover before an agent-facing error is acceptable) | Proxy lead with engine lead | Doc 05 |

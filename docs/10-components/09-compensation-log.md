@@ -129,7 +129,7 @@ The inverse op's `before` is the value the merge left in the target. That is wha
 
 Before-images come from the staleness check (doc 13 §6.5 step 4): the adapter has just read the current row for every key in the delta, and after the check passes those rows equal the base snapshot's rows. The module **must** use those rows, not a second read, so that the compensation describes exactly the state the merge replaced. Where the adapter's `describe()` (doc 08) reports that before-images are unavailable for a table or column (a CRM field that is write-only, a formula or encrypted field, a bulk-only API that cannot read by key), the affected ops are written with `before = null`, the keys are listed in `body/partial-keys.parquet`, and the record is `partial`. Reverting a `partial` record restores what it can; the changeset for such a revert carries `partial_keys` and policy **must** treat it as at least `hold` (the engine enforces this the same way it enforces `hold` on conflicts, doc 13 §6.6).
 
-The merge itself proceeds. Reversibility is known before the merge: the changeset engine computes `delta.reversible` at propose time from `describe()` and the delta's tables and columns, exposes it in the summary layer, and the queue UI shows "not fully reversible" before approval. **Decision:** a policy **may** block a merge that would not be fully reversible, via the built-in assertion `delta.reversible = false` available to every target's policies with outcome `block` or `hold`. Recommended default for new targets: `hold`. Flagged for founders in §12.
+The merge itself proceeds. Reversibility is known before the merge: the changeset engine computes `delta.reversible` at propose time from `describe()` and the delta's tables and columns, exposes it in the summary layer, and the queue UI shows "not fully reversible" before approval. **Decision:** a policy **may** block a merge that would not be fully reversible, via the built-in assertion `delta.reversible = 'partial'` available to every target's policies with outcome `block` or `hold`. Recommended default for new targets: `hold`. Flagged for founders in §12.
 
 ### 5.2 Write path (the merge checkpoint)
 
@@ -217,7 +217,7 @@ A record is eligible for GC when **all** hold:
 4. `legal_hold = 0`;
 5. for orphans (`merge_applied = 0`): `persisted_at` older than 7 days (doc 13 §9), conditions 1 and 3 waived.
 
-GC runs in the data plane every 10 minutes. For each eligible row it executes one transaction: `UPDATE ... SET status='expired' WHERE merge_id=? AND <all conditions re-checked>`; only if that updates one row does it delete body segments and the partial-keys file, then set `body_deleted_at`. The header is **retained indefinitely**: it is under 4 KB, it carries the chain link, and deleting it would make `VerifyChain` unable to prove the record once existed. A crash after the UPDATE and before the deletes leaves an `expired` row with bodies present; the next run finds `status='expired' AND body_deleted_at IS NULL` and deletes again. Deletes are idempotent (a missing object is success). **Decision:** headers are permanent; bodies expire.
+GC runs in the data plane every 10 minutes. For each eligible row it executes one transaction: `UPDATE ... SET status='expired' WHERE merge_id=? AND <all conditions re-checked>`; only if that updates one row does it delete body segments and the partial-keys file, then set `body_deleted_at`. The header is **retained indefinitely**: it is under 4 KB, it carries the chain link, and deleting it would make `VerifyChain` unable to prove the record once existed. A crash after the UPDATE and before the deletes leaves an `expired` row with bodies present; the next run finds `status='expired' AND body_deleted_at IS NULL` and deletes again. Deletes are idempotent (a missing object is success). **Decision:** headers are permanent; bodies expire. The Terraform-provisioned S3 lifecycle rule on the compensation prefix (doc 14) is a safety-net ceiling only, set to `retention_days + 30` with `header.json` excluded; this module's GC is the primary mechanism and the lifecycle rule must never fire on a record the index still considers retained.
 
 Legal hold is a per-record or per-target flag set by the control plane through the heartbeat (API in doc 10, open in §12). It only ever adds a condition; it never shortens retention. Object-store object lock is a possible belt-and-braces addition (§12).
 
@@ -309,7 +309,7 @@ The three signals an on-call engineer looks at first: `compensation_corrupt_tota
 - **Race tests.** `Open` and GC on the same record under a loop of 1,000 iterations; exactly one wins each time.
 - **Integrity.** Flip a byte in a segment and in a header; `Open` refuses, `Verify` marks `corrupt`, `VerifyChain` locates the break.
 - **Grant tests.** Expired, wrong-scope, and replayed grants are refused; every accepted read produces one audit event.
-- **Partial records.** A fixture adapter whose `describe()` withholds before-images for one column; assert `partial`, the keys file, the `hold` floor on the revert's verdict, and `delta.reversible = false` in the summary.
+- **Partial records.** A fixture adapter whose `describe()` withholds before-images for one column; assert `partial`, the keys file, the `hold` floor on the revert's verdict, and `delta.reversible = 'partial'` in the summary.
 - **Benchmarks.** `engine/benches/compensation.rs` for 1k and 100k rows; CI fails on > 5% regression (doc 18 §3).
 
 Fixtures are synthetic only (doc 18 §7).
@@ -327,7 +327,7 @@ Fixtures are synthetic only (doc 18 §7).
 
 | Question | Owner | Needed by |
 |---|---|---|
-| Confirm: a policy may `block` or `hold` a merge on `delta.reversible = false` via a built-in assertion, default `hold` for new targets (§5.1). | Founding team | Doc 06, before M0 |
+| Confirm: a policy may `block` or `hold` a merge on `delta.reversible = 'partial'` via a built-in assertion, default `hold` for new targets (§5.1). | Founding team | Doc 06, before M0 |
 | Confirm: compensation log is a module of the changeset engine, not a process (§2). | Architecture | Doc 05 |
 | Confirm: hash chain in M0; headers retained indefinitely, bodies expire (§5.2, §5.5). | Founding team | Doc 15 |
 | Customer-managed key integration per cloud (AWS KMS, GCP CMEK, Azure Key Vault) and how the Terraform module expresses it. | Infrastructure lead | Doc 14 |
