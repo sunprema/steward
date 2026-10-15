@@ -33,16 +33,16 @@ The changeset engine is the data-plane component that turns a branch's overlay p
 
 ### 3.1 Inbound
 
-The engine is a separate process in the data plane (`steward-engine`, see §5.1 Decision) exposing gRPC on a local Unix domain socket within the data-plane pod, and on mTLS TCP for the control plane's compute requests relayed through the data-plane gateway (doc 14). Protobuf definitions live in `contracts/engine/` (doc 18 §1).
+The engine is a separate process in the data plane (`steward-engine`, see §5.1 Decision) exposing gRPC on a local Unix domain socket within the data-plane pod, and receiving the control plane's compute requests as `Instruction` messages on the data-plane session stream (doc 10 §5), which the engine itself opens to the control plane. Protobuf definitions live in `contracts/engine/` (doc 18 §1).
 
 | RPC | Caller | Contract |
 |---|---|---|
-| `ComputeChangeset{changeset_id, branch_id, overlay_id, base_snapshot, impact_query_ids[], policy_version, revert_of?}` | Control plane (via gateway), doc 13 §6.3 step 4 | Blocks on the freeze marker; returns `{summary, impact, assertion_results[], evidence_refs[], row_delta_digest}` or a typed error. Idempotent for a given `(changeset_id, overlay_id)`: a recompute overwrites the local row delta with identical content. |
+| `ComputeChangeset{changeset_id, branch_id, overlay_id, base_snapshot, impact_query_ids[], policy_version, revert_of?}` | Control plane (via the session stream, doc 10 §5), doc 13 §6.3 step 4 | Blocks on the freeze marker; returns `{summary, impact, assertion_results[], evidence_refs[], row_delta_digest}` or a typed error. Idempotent for a given `(changeset_id, overlay_id)`: a recompute overwrites the local row delta with identical content. |
 | `GetRowDelta{changeset_id, table, page}` | Reviewer UI through a short-lived signed grant (doc 03 §2); merge worker | Pages of the persisted row delta. Never called by the control plane for storage. |
 | `StalenessCheck{merge_id, changeset_id, base_snapshot}` | Merge worker, doc 13 §6.5 step 4–5 | Returns `ok` or `stale_base{conflict_keys_ref}`. |
 | `ComputeCompensation{merge_id, changeset_id, base_snapshot}` | Merge worker, doc 13 §6.5 step 6 | Returns the compensation record as a stream of overlay-format batches for the compensation log to persist keyed by `merge_id`. |
 | `Compact{overlay_id, table?}` | Data-plane maintenance timer; proxy after a flush that crosses the segment threshold | Returns the new manifest version. |
-| `ReleaseOverlay{overlay_id}` | Data-plane GC after the heartbeat reply says `closed` or `unknown` (doc 13 §9) | Deletes segments, manifest, local caches, and the row deltas of the branch's changesets. |
+| `CloseOverlay{overlay_id}` | Data-plane GC after the heartbeat reply says `closed` or `unknown` (doc 13 §9) | Deletes segments, manifest, local caches, and the row deltas of the branch's changesets. |
 | `view(branch_id, table) -> Relation` | Write proxy, in-process through the `steward-overlay` crate | Overlay ∪ base snapshot with the overlay winning on key (§5.5). |
 
 ### 3.2 Outbound
@@ -86,7 +86,7 @@ One Parquet file set per overlay per table. Every segment has exactly this schem
 | `ts` | TIMESTAMP(MICROS, UTC), required | Proxy wall clock at append |
 | `stmt_id` | UTF8, required | Evidence correlation ID. Never the statement text |
 
-Writer settings: zstd level 3, row groups of 65,536 rows, column statistics on `seq`, `key_hash`, `ts`; a bloom filter on `key_hash`. **The WAL and the roll.** The durable per-write checkpoint is a local fsync'd write-ahead log on the data plane's persistent volume, one per branch, whose record format is owned by the shared `steward-overlay` crate and written by the proxy; Parquet on object storage is the at-rest form. The crate rolls the WAL into Parquet segments asynchronously at a size or time threshold (10,000 ops, 16 MiB, 2 s idle, or on freeze), never on the acknowledgement path, and truncates the WAL only once the segment PUT and the manifest update have succeeded; `view()` and `ComputeChangeset` read the unrolled WAL tail together with the segments so no acknowledged write is ever invisible. Segments are immutable once written. The manifest lists the live segments per table with their `[first_seq, last_seq]`, the table's schema fingerprint, and `compacted_through_seq`; it is updated by conditional PUT, so a stale writer loses and re-reads.
+Writer settings: zstd level 3, row groups of 65,536 rows, column statistics on `seq`, `key_hash`, `ts`; a bloom filter on `key_hash`. **The WAL and the roll.** The durable per-write checkpoint is a local fsync'd write-ahead log on the data plane's persistent volume, one per branch, whose record format is owned by the shared `steward-overlay` crate and written by the proxy; the authoritative WAL record layout is doc 12 §8.2; Parquet on object storage is the at-rest form. The crate rolls the WAL into Parquet segments asynchronously at a size or time threshold (10,000 ops, 16 MiB, 2 s idle, or on freeze), never on the acknowledgement path, and truncates the WAL only once the segment PUT and the manifest update have succeeded; `view()` and `ComputeChangeset` read the unrolled WAL tail together with the segments so no acknowledged write is ever invisible. Segments are immutable once written. The manifest lists the live segments per table with their `[first_seq, last_seq]`, the table's schema fingerprint, and `compacted_through_seq`; it is updated by conditional PUT, so a stale writer loses and re-reads.
 
 ### 4.2 Compaction
 
@@ -193,7 +193,7 @@ Output per assertion, persisted in the data plane:
 {policy_id, assertion_id, passed: bool, count: int, sample_keys: [up to 20], duration_ms, error?: {code, message}}
 ```
 
-`count` is the violation count up to a cap of 1,000,000 (`count_capped: true` beyond). On timeout (default 30 s per assertion), memory cap, or SQL error: `passed = false`, `error` set, `count = 0`. An error is never a pass. The whole assertion list has a budget of 5 minutes; assertions not reached are reported with `error.code = budget_exhausted`.
+`count` is the violation count up to a cap of 1,000,000 (`count_capped: true` beyond). On timeout (default 20 s per assertion, configurable in target settings (doc 06)), memory cap, or SQL error: `passed = false`, `error` set, `count = 0`. An error is never a pass. The whole assertion list has a budget of 60 s (configurable in target settings (doc 06)); assertions not reached are reported with `error.code = budget_exhausted`.
 
 **Decision on what crosses the boundary:** the message to the control plane carries every field except `sample_keys`, plus `sample_ref = <changeset_id>/<policy_id>/<assertion_id>`. Sample keys are primary-key values, which are row data under doc 13 invariant 9; the review UI fetches them from `GetRowDelta`-style paging under the same short-lived grant as the row delta (doc 03 §2). This departs from the brief's "results go to the control plane" in that one field only.
 
@@ -241,7 +241,7 @@ Because the inverse's `before` is exactly what M1 wrote, the revert changeset's 
 
 ### 5.7 Release
 
-`ReleaseOverlay` deletes the overlay's objects, local caches, and row deltas and samples for the branch's changesets, in that order, and is idempotent. It is only called after the heartbeat reply is `closed` or `unknown` (doc 13 §9); the engine does not check state itself.
+`CloseOverlay` deletes the overlay's objects, local caches, and row deltas and samples for the branch's changesets, in that order, and is idempotent. It is only called after the heartbeat reply is `closed` or `unknown` (doc 13 §9); the engine does not check state itself.
 
 ## 6. Failure modes
 
@@ -288,7 +288,7 @@ Doc 18 §2 requires a benchmark under `benches/` for anything the proxy touches 
 
 The engine sits inside the data plane's trust boundary and executes SQL authored by the customer's own users. Its job is to make sure that SQL can only see changeset relations.
 
-- The engine holds no target credentials; the adapter host does (doc 03 §4). It authenticates the control plane's compute requests by the data-plane gateway's mTLS identity and the proxy and merge worker by Unix socket peer credentials.
+- The engine holds no target credentials; the adapter host does (doc 03 §4). It authenticates the control plane's compute requests by the session stream's mTLS identity (doc 10 §5) and the proxy and merge worker by Unix socket peer credentials.
 - Every customer statement is parsed first and **must** be a single `SELECT` (DuckDB statement type check); anything else is rejected before execution. Statements run on a dedicated in-memory DuckDB instance per computation, created with: `enable_external_access = false` (no filesystem, HTTP, or remote reads from SQL), `disabled_filesystems = 'LocalFileSystem'`, `autoinstall_known_extensions = false`, `autoload_known_extensions = false`, `allow_unsigned_extensions = false`, `allow_community_extensions = false`, `allow_persistent_secrets = false`, `enable_progress_bar = false`, `memory_limit`, `threads`, and `temp_directory` set, then `lock_configuration = true` so SQL cannot `SET` any of them back. The relations of §5.2 are registered as Arrow and Parquet views before locking; no attached databases, no `COPY`, no `ATTACH`.
 - The relations are read-only by construction (views over immutable Parquet and Arrow buffers); the sandbox has no writable table.
 - The engine **must never** log row values, key values, statement text that could contain values, or sample keys. Logs carry IDs, counts, durations, table names, column names, and error codes only (doc 18 §2). Error messages from DuckDB are scrubbed of literal values before logging and before being returned across the boundary; the full message is kept locally under the changeset for the grant-holding reviewer.

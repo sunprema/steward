@@ -47,7 +47,7 @@ The write proxy is the data-plane component agents connect to. It speaks the tar
 
 **Agents, REST shim for Salesforce / HubSpot.** Not in M0; targeted with the CRM adapters. The agent calls a Steward endpoint shaped like the target's own REST API (e.g. `PATCH /services/data/vXX/sobjects/Account/<id>`), with the branch carried in a header `Steward-Branch: <branch_id>` and the API key as a bearer token. Each REST call maps to one classified statement; the same routing, freeze, overlay, and evidence paths apply.
 
-**Control plane, gRPC over mTLS (contracts in `contracts/`).** Three inbound calls only: `RoutingUpsert` (branch → overlay, base snapshot reference, credential reference, state, policy version), `Freeze` (doc 13 §6.3 step 2, synchronous with a short timeout), and `InitialiseOverlay` (doc 13 §6.1 step 2). None of these is on the query path. The heartbeat is sent by `steward-engine`, not the proxy; the engine relays heartbeat replies to the proxy over the local socket (§3.2, §5.6).
+**Control plane, gRPC over mTLS (contracts in `contracts/`).** Three instructions only, delivered as `Instruction` messages on the data-plane session stream that `steward-engine` opens to the control plane (doc 10 §5; the control plane never dials into the data plane) and relayed to the proxy over the local socket: `RoutingUpsert` (branch → overlay, base snapshot reference, credential reference, state, policy version), `FreezeWrites` (doc 13 §6.3 step 2, synchronous with a short timeout), and `InitialiseOverlay` (doc 13 §6.1 step 2). None of these is on the query path. The heartbeat is sent by `steward-engine`, not the proxy; the engine relays heartbeat replies to the proxy over the local socket (§3.2, §5.6).
 
 ### 3.2 Outbound
 
@@ -58,9 +58,9 @@ The write proxy is the data-plane component agents connect to. It speaks the tar
 | Evidence log (local append-only file per branch) | In-process append, batched fsync | < 1 ms | Best-effort; failure increments `evidence_gap` (doc 13 §6.2 failure 4) |
 | Adapter host (Java) | gRPC over a local Unix socket; one `SnapshotRead` stream per statement | p50 1 ms + target latency | Required for any read that touches the snapshot; absence fails reads, not overlay writes |
 | Changeset engine (`steward-engine`, DuckDB) | `view()` and the overlay WAL writer are in-process through the shared `steward-overlay` crate; everything else is gRPC over a local Unix socket to the separate `steward-engine` process (doc 05 §5.1), including the per-branch facts the engine folds into its heartbeat | 5–50 ms per merged read, estimate | Required for merged reads and for writes with a `WHERE` clause; absence fails those statements with a retryable error |
-| Control plane | None directly on the outbound side: the heartbeat is sent by `steward-engine`; the proxy only receives the inbound calls above | Irrelevant to any query | **May be down indefinitely.** No query waits on it |
+| Control plane | None directly on the outbound side: the session stream and heartbeat are owned by `steward-engine`; the proxy only receives the instructions above, relayed over the local socket | Irrelevant to any query | **May be down indefinitely.** No query waits on it |
 
-The proxy **must not** open a network connection outside the customer's cloud; the only cross-boundary traffic it sees is the inbound `contracts/`-defined control-plane calls above.
+The proxy **must not** open a network connection outside the customer's cloud; the only cross-boundary traffic it sees is the `contracts/`-defined control-plane instructions above, which arrive on the engine's outbound session stream (doc 10 §5).
 
 ## 4. State
 
@@ -96,7 +96,7 @@ sequenceDiagram
     else branch missing
         P-->>A: ErrorResponse SD002 branch_not_routable (retryable)
     else branch terminal
-        P-->>A: ErrorResponse SD003 branch_abandoned (or merged/rejected/closed)
+        P-->>A: ErrorResponse SD003 branch_merged / SD00A branch_rejected / SD00B branch_abandoned / SD00C branch_closed
     else ok
         P-->>A: AuthenticationOk, ParameterStatus..., ReadyForQuery
     end
@@ -170,7 +170,7 @@ Failure at each step: engine unavailable → `SD007` and the transaction is abor
 
 ### 5.4 Freeze
 
-The proxy learns of a freeze two ways: the synchronous `Freeze` call at propose (doc 13 §6.3 step 2) and the heartbeat reply with `freeze: true` or an authoritative state other than `open` (doc 13 §6.8 table). In both cases the proxy, in one step, sets `frozen = true` in the routing store row and appends the freeze marker to the overlay WAL at the current sequence number, then acknowledges. The changeset engine reads only up to the marker (doc 13 §6.2 failure 6). After the marker, every write and every `COMMIT` on the branch returns `SD001 branch_frozen` with the message `branch <id> is proposed; writes are frozen until it returns to open`. Reads continue to work. Unfreeze (`proposed → open`, doc 13 §2.1) clears the flag and appends an unfreeze marker; the engine treats the span between markers as excluded. Writes in flight when the freeze lands are either before the marker (in the overlay, part of the changeset) or after (rejected); there is no third case because marker append and flag set happen under the branch's overlay append lock.
+The proxy learns of a freeze two ways: the synchronous `FreezeWrites` instruction at propose (doc 13 §6.3 step 2) and the heartbeat reply with `freeze: true` or an authoritative state other than `open` (doc 13 §6.8 table). In both cases the proxy, in one step, sets `frozen = true` in the routing store row and appends the freeze marker to the overlay WAL at the current sequence number, then acknowledges. The changeset engine reads only up to the marker (doc 13 §6.2 failure 6). After the marker, every write and every `COMMIT` on the branch returns `SD001 branch_frozen` with the message `branch <id> is proposed; writes are frozen until it returns to open`. Reads continue to work. Unfreeze (`proposed → open`, doc 13 §2.1) clears the flag and appends an unfreeze marker; the engine treats the span between markers as excluded. Writes in flight when the freeze lands are either before the marker (in the overlay, part of the changeset) or after (rejected); there is no third case because marker append and flag set happen under the branch's overlay append lock.
 
 ### 5.5 Evidence capture
 
@@ -180,14 +180,14 @@ Per statement, after the response is sent, the proxy appends one record to the b
 
 ### 5.6 Heartbeat and routing-store maintenance
 
-The heartbeat to the control plane is sent by `steward-engine` (doc 13 §6.8), which holds merge progress and compensation status. One tokio task per proxy instance reports the proxy's per-branch facts for every routed branch, `{branch_id, overlay_id, believed_state, overlay_size, freeze_acknowledged, evidence_gap, base_snapshot_gone?}`, to the engine over the local Unix socket at ~30 s ± 20 %, and receives back the authoritative state the engine obtained from the control plane. The reply is applied to the routing store per the doc 13 §6.8 table. `unknown` and `closed` remove the row and schedule overlay GC; terminal states keep the row with `believed_state = done` until retention so a late connection gets `SD003` with the right reason rather than `SD002`. Engine or control-plane unavailability is a non-event for queries: the task logs, backs off to 60 s, and the routing store is untouched.
+The heartbeat to the control plane is sent by `steward-engine` (doc 13 §6.8), which holds merge progress and compensation status. One tokio task per proxy instance reports the proxy's per-branch facts for every routed branch, `{branch_id, overlay_id, believed_state, overlay_size, freeze_acknowledged, evidence_gap, base_snapshot_gone?}`, to the engine over the local Unix socket at ~30 s ± 20 %, and receives back the authoritative state the engine obtained from the control plane. The reply is applied to the routing store per the doc 13 §6.8 table. `unknown` and `closed` remove the row and schedule overlay GC; terminal states keep the row with `believed_state = done` until retention so a late connection gets the per-state terminal code (`SD003 branch_merged`, `SD00A branch_rejected`, `SD00B branch_abandoned`, `SD00C branch_closed`) rather than `SD002`. Engine or control-plane unavailability is a non-event for queries: the task logs, backs off to 60 s, and the routing store is untouched.
 
 ## 6. Failure modes
 
 | Failure | Detection | Impact | Recovery |
 |---|---|---|---|
 | Routing store corruption (SQLite integrity check fails at open, or `SQLITE_CORRUPT` at runtime) | `PRAGMA integrity_check` at startup; error codes at runtime | Instance refuses new connections with `SD007`; existing sessions keep their in-memory resolution and continue | Instance renames the file aside and starts empty; routing rows are rebuilt from the next heartbeat replies and `RoutingUpsert` pushes within ~30–60 s. Overlays and evidence are untouched because they are separate files. Alert fires |
-| Routing store disk full | Write error on heartbeat apply | Queries unaffected (reads of the store still work); state updates stall, so freezes learned by heartbeat are delayed | Alert; operator frees space. The synchronous `Freeze` call still sets the in-memory flag and appends the marker, so propose is not blocked |
+| Routing store disk full | Write error on heartbeat apply | Queries unaffected (reads of the store still work); state updates stall, so freezes learned by heartbeat are delayed | Alert; operator frees space. The synchronous `FreezeWrites` instruction still sets the in-memory flag and appends the marker, so propose is not blocked |
 | Overlay store unreachable (persistent volume gone or read-only) | Append returns error | Every write and `COMMIT` on every branch fails with `SD007`; reads continue | Writes are not acknowledged, so nothing is lost; the agent retries. Alert. Branch state is not affected |
 | Object-storage roll of overlay segments failing | Roll task error, `overlay_roll_lag_seconds` gauge | None on the query path; WAL grows | Retry with backoff; alert when lag > 15 min or WAL > ceiling |
 | Snapshot connection lost mid-transaction (adapter restarts, CoW branch dropped) | gRPC stream error from adapter | The current statement fails with `SD007` (retryable) or `SD004 base_snapshot_gone` (not retryable); an open transaction's buffer is kept so the agent can retry the statement; if `SD004`, the branch is reported in the next heartbeat and the control plane abandons it (doc 13 §6.2 failure 3) | Adapter host restarts and re-establishes the snapshot connection pool; for `SD004`, the principal creates a new branch |

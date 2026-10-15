@@ -65,7 +65,7 @@ Nothing here depends on the control plane synchronously (doc 03 §5, data-plane 
 
 | State | Where | Durability | Role |
 |---|---|---|---|
-| Compensation records (header + body segments) | Object store, `targets/<target_id>/compensation/<merge_id>/` | Durable, write-once, encrypted at rest with the customer-managed key | **Source of truth** for the content of every inverse. The only copy. |
+| Compensation records (header + body segments) | Object store, `steward/targets/<target_id>/compensation/<merge_id>/` | Durable, write-once, encrypted at rest with the customer-managed key | **Source of truth** for the content of every inverse. The only copy. |
 | Compensation index | SQLite `compensation.db` on the durable volume | Durable (WAL, fsync) | Derived from headers plus control-plane instructions; fully rebuildable from the object store (§5.4) except the mutable fields, which are re-sent by the control plane. |
 | Per-target chain head (`last_header_hash`) | Same SQLite file | Durable | Derived; rebuildable by walking headers. |
 | Index metadata mirror | Control plane metadata Postgres | Control plane's concern | A display cache; never authoritative for content and never contains row data. |
@@ -73,11 +73,11 @@ Nothing here depends on the control plane synchronously (doc 03 §5, data-plane 
 **Storage layout.**
 
 ```
-targets/<target_id>/compensation/<merge_id>/
+steward/targets/<target_id>/compensation/<merge_id>/
     body/<table>-<seq>.parquet      op schema identical to the overlay (doc 05); seq from 0000
     body/partial-keys.parquet       only when status = partial: (table, key) rows
     header.json                     written last; existence = record is valid
-targets/<target_id>/compensation/_exports/<export_id>/   signed bundles (§5.6)
+steward/targets/<target_id>/compensation/_exports/<export_id>/   signed bundles (§5.6)
 ```
 
 **Header.** JSON, under 4 KB in the common case:
@@ -117,17 +117,17 @@ stateDiagram-v2
 
 ### 5.1 Inverse rules and the body
 
-The body uses the overlay op schema from doc 05 exactly: one row per op with `table, op, key, values, before_image, seq`. Inverse rules, which **must** match doc 05's and are restated here only so this document reads alone:
+The body uses the overlay segment schema from doc 05 §4.1 exactly, one Parquet file set per table, with columns `seq, op, key, key_hash, before, after, touched, ts, stmt_id`. Inverse rules, which **must** match doc 05's and are restated here only so this document reads alone:
 
-| Merge op | Inverse op in the body | `before_image` of the inverse op |
+| Merge op | Inverse op in the body | `before` of the inverse op |
 |---|---|---|
-| `insert(key, values)` | `delete(key)` | `values` (the row the merge created) |
-| `update(key, values, before)` | `update(key, before)` | `values` (what the merge wrote) |
-| `delete(key, before)` | `insert(key, before)` | null (the key is expected to be absent) |
+| `insert(key, after)` | `delete(key)` | `after` (the row the merge created) |
+| `update(key, after, before)` | `update(key, after = before)` | `after` (what the merge wrote) |
+| `delete(key, before)` | `insert(key, after = before)` | null (the key is expected to be absent) |
 
-The inverse op's `before_image` is the value the merge left in the target. That is what doc 13 §6.6 calls the "expected current value" and is what the changeset engine compares to the target when it computes a revert's `conflicts` section. So the body serves both revert and conflict detection without a second format.
+The inverse op's `before` is the value the merge left in the target. That is what doc 13 §6.6 calls the "expected current value" and is what the changeset engine compares to the target when it computes a revert's `conflicts` section. So the body serves both revert and conflict detection without a second format.
 
-Before-images come from the staleness check (doc 13 §6.5 step 4): the adapter has just read the current row for every key in the delta, and after the check passes those rows equal the base snapshot's rows. The module **must** use those rows, not a second read, so that the compensation describes exactly the state the merge replaced. Where the adapter's `describe()` (doc 08) reports that before-images are unavailable for a table or column (a CRM field that is write-only, a formula or encrypted field, a bulk-only API that cannot read by key), the affected ops are written with `before_image = null`, the keys are listed in `body/partial-keys.parquet`, and the record is `partial`. Reverting a `partial` record restores what it can; the changeset for such a revert carries `partial_keys` and policy **must** treat it as at least `hold` (the engine enforces this the same way it enforces `hold` on conflicts, doc 13 §6.6).
+Before-images come from the staleness check (doc 13 §6.5 step 4): the adapter has just read the current row for every key in the delta, and after the check passes those rows equal the base snapshot's rows. The module **must** use those rows, not a second read, so that the compensation describes exactly the state the merge replaced. Where the adapter's `describe()` (doc 08) reports that before-images are unavailable for a table or column (a CRM field that is write-only, a formula or encrypted field, a bulk-only API that cannot read by key), the affected ops are written with `before = null`, the keys are listed in `body/partial-keys.parquet`, and the record is `partial`. Reverting a `partial` record restores what it can; the changeset for such a revert carries `partial_keys` and policy **must** treat it as at least `hold` (the engine enforces this the same way it enforces `hold` on conflicts, doc 13 §6.6).
 
 The merge itself proceeds. Reversibility is known before the merge: the changeset engine computes `delta.reversible` at propose time from `describe()` and the delta's tables and columns, exposes it in the summary layer, and the queue UI shows "not fully reversible" before approval. **Decision:** a policy **may** block a merge that would not be fully reversible, via the built-in assertion `delta.reversible = false` available to every target's policies with outcome `block` or `hold`. Recommended default for new targets: `hold`. Flagged for founders in §12.
 
@@ -276,7 +276,7 @@ Before-images are the most sensitive data Steward holds: they are the old values
 - **Access only via grant.** Every read of a body outside the merge worker's own flows (reviewer display, export, operator `Verify` with content) requires a short-lived signed grant minted by the control plane, scoped to a merge ID or a target and an action, verified by the data plane's grant endpoint against the control plane's public key. Grants are never reusable across actions.
 - **Audit every read.** Each `Open`, display read, `Export`, and content `Verify` writes an audit event `{merge_id, action, principal, grant_id, at}` to the data plane audit log and reports it (metadata only) to the control plane.
 - **Immutability.** The data-plane role may not overwrite an existing `header.json` (bucket versioning plus a deny on overwrite of `*/header.json`, where the store supports it); the module never issues such a write except the single rewrite in the checksum-mismatch path, which deletes first.
-- **Never logged:** any `values` or `before_image`, keys of partial records, export destinations containing row data. Logs carry merge IDs, counts, hashes, and durations (doc 18 §2).
+- **Never logged:** any `before` or `after` row image, keys of partial records, export destinations containing row data. Logs carry merge IDs, counts, hashes, and durations (doc 18 §2).
 - **Export signing key** lives in the data plane's secret store and never leaves the customer's account; the control plane holds only the public key.
 
 ## 9. Observability

@@ -40,7 +40,7 @@ The control plane is the one deployable unit Steward operates: the branch coordi
 | Caller | Protocol | Contract | Handled by |
 |---|---|---|---|
 | Agents and SDKs (doc 11) | REST over HTTPS, API-key auth | Doc 10 | `steward_web` Phoenix router |
-| Data planes (proxy, changeset engine, merge worker) | gRPC over mTLS: `Heartbeat`, `ReportAssertionResults`, `ReportChangesetSummary`, `ReportMergeOutcome`, `InitialiseOverlayResponse` stream | Doc 10, protobuf in `contracts/` | `steward_web` gRPC endpoint |
+| Data planes (proxy, changeset engine, merge worker) | One bidirectional gRPC `Session` stream over mTLS, opened by the data plane (doc 10 §5): `Heartbeat`, `ChangesetReport`, `MergeOutcome`, `InstructionResult` arrive on it | Doc 10, protobuf in `contracts/` | `steward_web` gRPC endpoint |
 | Reviewers and admins | HTTPS, WebSocket (LiveView), SSO session | This doc §5.5 | `steward_web` LiveView |
 | Reviewer's browser → data plane | HTTPS with a grant JWT (§5.6) | Doc 10 grant endpoint | Verified by the data plane, not by us |
 
@@ -51,7 +51,7 @@ The control plane is the one deployable unit Steward operates: the branch coordi
 | Dependency | Mechanism | Assumption |
 |---|---|---|
 | Metadata Postgres | Ecto, pool of 20 connections per node | Single-primary, synchronous replica, p99 simple-statement < 5 ms in-region. Unreachable means transitions refuse (§6). |
-| Data plane (per customer) | gRPC client over mTLS: `InitialiseOverlay`, `FreezeWrites`, `ComputeChangeset`, `Merge`, `CloseOverlay` | May be unreachable for minutes; every call is after a checkpoint or before one and retried with fresh IDs (doc 13 §6). **Never called inside an Ecto transaction** (doc 13 invariant 10). Call timeouts: freeze 2 s, overlay init 10 s, others 5 s. |
+| Data plane (per customer) | `Instruction` messages sent on the data-plane-opened `Session` stream (doc 10 §5; the control plane never dials into the data plane): `InitialiseOverlay`, `FreezeWrites`, `ComputeChangeset`, `RunAssertions`, `Merge`, `Revert`, `CloseOverlay`, `RoutingUpsert`, `SetRetention` | May be unreachable for minutes; every call is after a checkpoint or before one and retried with fresh IDs (doc 13 §6). **Never called inside an Ecto transaction** (doc 13 invariant 10). Call timeouts: freeze 2 s, overlay init 10 s, others 5 s. |
 | Oban (same Postgres) | `Oban.insert/2` inside the state-changing transaction | Jobs are durable with the state change; may be minutes late (doc 03 §5). |
 | Analytics / billing store | Oban export job reading `events` by cursor | Open (doc 03 §11); the export is write-only and idempotent by event id. |
 | SSO provider | OIDC via `ueberauth` | Open provider list (§12). |
@@ -175,7 +175,7 @@ Acquire: `UPDATE targets SET merging_merge_id = $m, lease_expires_at = now() + i
 | Target settings | TTLs, retention, memberships, impact queries | — |
 | Audit log | `events` filtered by org/target, read-only | — |
 
-No JS framework (doc 18 §2); the row-delta viewer is a LiveView component that issues a `fetch` from a tiny JS hook. **Grant: a JWT (ES256, key pair per control-plane deployment, public key delivered to data planes through configuration and rotated with a 24 h overlap) with claims `iss` = control plane, `aud` = data-plane id, `sub` = principal id, `org`, `cs` = changeset id, `scope` = `row_delta:read`, `jti`, `exp` = issue + 5 minutes.** Minted by `POST /changesets/:id/grant` (doc 10) only for a principal with `reviewer` on the target, logged as a `grant.issued` event. The data plane verifies signature, `aud`, `exp`, and that `cs` matches the requested changeset, then serves pages from its local row delta. The control plane never sees the response.
+No JS framework (doc 18 §2); the row-delta viewer is a LiveView component that issues a `fetch` from a tiny JS hook. **Grant: a JWT (ES256, key pair per control-plane deployment, public key delivered to data planes through configuration and rotated with a 24 h overlap) with claims `iss` = control plane, `aud` = data-plane id, `sub` = principal id, `org`, `cs` = changeset id, `scope` = `row_delta:read`, `jti`, `exp` = issue + 5 minutes.** Minted by `POST /v1/changesets/{id}/grants` (doc 10) only for a principal with `reviewer` on the target, logged as a `grant.issued` event. The data plane verifies signature, `aud`, `exp`, and that `cs` matches the requested changeset, then serves pages from its local row delta. The control plane never sees the response.
 
 ### 5.7 Domain events and consumers
 

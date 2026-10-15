@@ -19,7 +19,7 @@ stateDiagram-v2
     [*] --> open : create (checkpoint: branch row written)
     open --> proposed : propose
     open --> abandoned : abandon / TTL expiry
-    proposed --> open : withdraw / reject-with-retry / stale_base
+    proposed --> open : withdraw / reject_with_retry / stale_base
     proposed --> merging : verdict auto-merge / review approve
     proposed --> rejected : verdict block / review reject
     proposed --> abandoned : abandon / held-TTL expiry
@@ -96,7 +96,7 @@ A `block` verdict is terminal for the branch, not merely for the changeset: appr
 | `rejected` with retry | `open` | See below. |
 | `edited` | `proposed` (new changeset), then `merging` if the new verdict permits | See below. Not in M0. |
 
-**Reject with retry** is a `rejected` review decision with a flag `allow_retry: true` and an optional reviewer note. Instead of making the branch terminal, the control plane returns the branch to `open`, marks the changeset `superseded`, and unfreezes writes. The owning principal may write further and propose again. The reviewer note is delivered to the principal through the SDK as part of the propose response that was rejected. The review record is still permanent; the branch simply gets another changeset. Reject with retry **should** be the default reject in the queue UI because it preserves the agent's work and base snapshot; a plain reject is for "this whole task was wrong."
+**Reject with retry** is a `rejected` review decision with a flag `allow_retry: true` and an optional reviewer note. Instead of making the branch terminal, the control plane returns the branch to `open`, marks the changeset `superseded`, and unfreezes writes. The owning principal may write further and propose again. The reviewer note is delivered to the principal as `review.note` on `GET /v1/changesets/{id}` (which the SDK surfaces) and in the `review.recorded` webhook (doc 10). The review record is still permanent; the branch simply gets another changeset. Reject with retry **should** be the default reject in the queue UI because it preserves the agent's work and base snapshot; a plain reject is for "this whole task was wrong."
 
 **Edit** is a review decision carrying a modified row delta (a subset, or a subset with modified values, of the current changeset's row delta). The control plane creates a new changeset in `computing`, sends the edited delta to the data plane, which stores it as the branch's new overlay content and computes summary and impact. Policy is re-evaluated: an edit **may** itself be held or blocked, because the reviewer's edit is still a change to the target. If the new verdict is `auto-merge` or the editing reviewer has approve rights and the verdict is `hold`, the branch moves to `merging`; if `block`, it moves to `rejected`. The editing reviewer does not get to approve their own edit if the target requires separate approval (doc 07).
 
@@ -193,24 +193,25 @@ sequenceDiagram
     participant CE as Changeset engine (DuckDB)
     participant PE as Policy engine
 
-    A->>CP: POST /branches/B1/propose {idempotency_key, rationale}
+    A->>CP: POST /v1/branches/B1/propose {idempotency_key, rationale}
     CP->>CP: 1. tx: state=proposed, changeset C1=computing, prior changesets superseded
+    CP-->>A: 202 {changeset_id, state: computing}
     CP->>P: 2. freeze writes for B1 (sync, short timeout)
     P->>P: 3. write freeze marker to overlay O1
     CP->>CE: 4. compute changeset C1 for (O1, base snapshot, impact queries)
     CE->>CE: 5. DuckDB: row delta, summary, impact
     CE->>CE: 6. persist row delta locally keyed by C1
     CE-->>CP: 7. {summary, impact, evidence refs, row_delta_digest}
-    CP->>PE: 8. run_assertions in data plane; combine per-assertion results into verdict
+    CP->>PE: 8. assertion results from ComputeChangeset (ChangesetReport); combine into verdict
     PE-->>CP: verdict
     CP->>CP: 9. tx: C1=evaluated, verdict recorded — CHECKPOINT
     CP->>CP: 10. best-effort: enqueue (hold) / start merge (auto-merge) / set rejected (block)
-    CP-->>A: {changeset_id, verdict, reasons}
+    A->>CP: GET /v1/changesets/C1 (poll) → state: evaluated, verdict, reasons
 ```
 
 **Checkpoint:** step 9, the verdict recorded against changeset C1 in metadata Postgres.
 
-Step 2 is synchronous so the agent's propose call reliably freezes writes, but if it times out the control plane proceeds; the proxy will learn `proposed` from its next heartbeat and write the freeze marker then. The engine blocks on the marker. At step 8, ALL assertions execute in the data plane via `run_assertions` (doc 05, doc 06); only per-assertion results (status, count, `sample_ref`) cross to the control plane, which combines them into the verdict. The row delta does not cross planes.
+Propose is asynchronous: the control plane answers `202 {changeset_id, state: "computing"}` as soon as step 1 commits, and the agent polls `GET /v1/changesets/{id}` until `state` becomes `evaluated`, when the verdict and reasons appear (doc 10 §4, doc 11). Step 2 is synchronous from the control plane's side so writes are reliably frozen before compute, but if it times out the control plane proceeds; the proxy will learn `proposed` from its next heartbeat and write the freeze marker then. The engine blocks on the marker. At step 8, ALL assertions execute in the data plane as part of `ComputeChangeset`, whose `ChangesetReport` carries the results (`RunAssertions` is only for re-evaluation; doc 05, doc 06, doc 10 §5); only per-assertion results (status, count, `sample_ref`) cross to the control plane, which combines them into the verdict. The row delta does not cross planes.
 
 Failure analysis:
 
@@ -221,7 +222,7 @@ Failure analysis:
 5. Step 8 fails (policy engine error): verdict is not recorded; retried with the same C1. A policy that errors at evaluation produces `hold` with reason `policy_error` rather than silently passing. Repaired by retry.
 6. Step 9 fails: same as 5.
 7. Step 10 fails (queue insert or merge kickoff fails): the verdict is recorded. An Oban job reconciles: every `evaluated` changeset with verdict `hold` and no queue entry gets one; every `auto-merge` with no merge row gets a merge started; every `block` whose branch is not `rejected` is set `rejected`. Repaired by job within one minute.
-8. Response to the agent lost: agent retries with the same key; receives the recorded verdict.
+8. Response to the agent lost: agent retries with the same key; receives the same `changeset_id`, and polling `GET /v1/changesets/{id}` returns the recorded verdict.
 
 ### 6.4 Review
 
@@ -281,7 +282,7 @@ sequenceDiagram
 
 **Checkpoint:** step 7, the compensation record persisted in the compensation log keyed by merge ID. A merge whose compensation is persisted is committed to: the system will keep retrying apply until every row is confirmed, and will never return the branch to `proposed`. A merge whose compensation is not persisted has not happened and can be retried with a fresh merge ID or abandoned back to `proposed`.
 
-**Staleness check.** Before computing compensation, the data plane reads the current target rows for every key in the row delta (inserts: the key must not exist; updates and deletes: the row must exist) and compares them, column by column over the columns the delta touches plus the key, against the base snapshot's rows for the same keys. If any differ, the merge fails with `stale_base`. The control plane sets the merge `failed`, releases the lease, returns the branch to `proposed`, and the data plane computes a new changeset whose summary includes a `conflicts` section listing the keys that changed and the before/after values from the target (not from the overlay). The new changeset is re-evaluated by policy and the verdict **must** be at least `hold`. There is no three-way merge: the principal withdraws and retries on a new branch, or a reviewer rejects. For CRMs whose base snapshot is a timestamp, the check compares `last_modified` of each row to the snapshot timestamp in addition to column values; see section 12.
+**Staleness check.** Before computing compensation, the data plane reads the current target rows for every key in the row delta (inserts: the key must not exist; updates and deletes: the row must exist) and compares them, column by column over the columns the delta touches plus the key, against the base snapshot's rows for the same keys. If any differ, the merge fails with `stale_base`. The control plane sets the merge `failed`, releases the lease, returns the branch to `proposed`, and the data plane computes a new changeset whose summary includes a `conflicts` section carrying only `conflicts_count` and `conflicts_ref`; the conflicting keys and their before/after values from the target (not from the overlay) stay in the data plane behind `conflicts_ref`. The new changeset is re-evaluated by policy and the verdict **must** be at least `hold`. There is no three-way merge: the principal withdraws and retries on a new branch, or a reviewer rejects. For CRMs whose base snapshot is a timestamp, the check compares `last_modified` of each row to the snapshot timestamp in addition to column values; see section 12.
 
 **Partial application on non-transactional targets.** For Postgres and Snowflake the adapter applies the row delta in one transaction when the delta fits (default threshold 50,000 rows), and step 9 is trivial; above that, it is chunked in 10,000-row transactions with per-chunk progress recorded, resumable by merge ID (doc 08 §5.2). For Salesforce and HubSpot there is no transaction: the adapter **must** be idempotent per row, keyed by (merge ID, row key), using an external-ID field or a Steward-managed sidecar table where the target permits, and otherwise by re-reading the row before writing it. The data plane records per-row progress for M1 durably; a retry (after crash or rate limit) resumes from the last confirmed row. The merge is `applied` only when every row is confirmed by the adapter. Until then the merge is `pending` and the branch stays `merging`; the heartbeat carries `merge_progress` so the control plane and the UI can show "412 of 1,000 rows applied". Progress stalled past a configurable budget (default 1 hour) raises an alert for a human; the human **may** force a revert (compensation is already persisted, so revert is always possible, including for the applied subset) but **must not** mark the merge applied by hand.
 
@@ -302,7 +303,7 @@ Failure analysis:
 
 ```mermaid
 sequenceDiagram
-    participant H as Principal (human or agent)
+    participant H as Principal with target_admin (human or service)
     participant CP as Control plane
     participant DP as Data plane
     participant CL as Compensation log
@@ -398,6 +399,8 @@ The merge ID is the identifier that makes the adapter apply idempotent: an adapt
 | Changeset summary and impact | Indefinite (metadata) | No | Small; the audit trail |
 | Row delta | Same as overlay | Per target | Lives in data plane beside overlay |
 | Idempotency keys | 24 hours | No | |
+| `events` (control-plane Postgres) | 90 days after the analytics export has passed the partition (doc 07 §6, doc 12 §9) | No | Monthly partition drop |
+| `audit_log` (control-plane Postgres) | 2 years (default pending doc 15) | Doc 15 | Partition drop |
 | Orphaned compensation records (no merge checkpoint: merge ID with no `applied` merge) | 7 days | No | From 6.5 failure 6; GC'd by the data plane |
 
 GC runs in the data plane, driven by `closed` transitions from the control plane and by local retention timers for compensation and evidence. The data plane **must not** delete an overlay while its branch is non-terminal; it checks the authoritative state in the heartbeat reply before deleting.
