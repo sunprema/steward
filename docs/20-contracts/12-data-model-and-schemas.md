@@ -22,7 +22,9 @@ The source for every durable schema Steward owns: the control-plane metadata Pos
 CREATE TYPE principal_kind     AS ENUM ('agent','human','service');
 CREATE TYPE target_kind        AS ENUM ('postgres','mysql','iceberg','snowflake','bigquery','salesforce','hubspot');
 CREATE TYPE snapshot_fidelity  AS ENUM ('TRUE_SNAPSHOT','TIMESTAMP_BOUNDED');            -- doc 08
-CREATE TYPE capability         AS ENUM ('reviewer','policy_read','policy_write','policy_admin','target_admin'); -- doc 07 §8 + doc 06 §8
+CREATE TYPE capability         AS ENUM ('reviewer','policy_admin','target_admin'); -- membership capabilities, doc 07 §8
+-- api_key_scopes: API-key scopes (`resource:verb`, e.g. policy:read, policy:write, merge:revert) are NOT membership capabilities;
+-- they live on api_keys.scopes text[] and the canonical list is doc 10 §3 (doc 06 §8's policy_read/policy_write map to policy:read/policy:write).
 CREATE TYPE branch_state       AS ENUM ('open','proposed','merging','merged','rejected','abandoned','closed');
 CREATE TYPE changeset_state    AS ENUM ('computing','evaluated','superseded');
 CREATE TYPE verdict_outcome    AS ENUM ('auto-merge','hold','block');
@@ -317,10 +319,10 @@ Every table also has `org_id`, `inserted_at`, `updated_at`, `UNIQUE (org_id, id)
 |---|---|---|
 | `orgs` | `id uuid`, `slug text`, `name text`, `archived_at timestamptz` | PK `id`; `UNIQUE slug`. No `org_id`. |
 | `principals` | `id`, `kind principal_kind`, `slug text`, `display_name text`, `org_admin bool`, `email text` (humans), `sso_subject text` (humans), `disabled_at` | `UNIQUE (org_id, kind, slug)`; the policy-scope form `agent:pricing-bot` is `kind || ':' || slug` (doc 06 §4.2) |
-| `api_keys` | `id`, `principal_id`, `prefix text` (the `stw_<prefix>` part), `secret_sha256 bytea(32)`, `target_ids uuid[]`, `last_used_at`, `expires_at`, `revoked_at` | `UNIQUE prefix`; secret never stored (doc 07 §8); pushed to data planes via `RoutingUpsert` (doc 04 §8) |
+| `api_keys` | `id`, `principal_id`, `prefix text` (the `stw_<prefix>` part), `secret_sha256 bytea(32)`, `scopes text[]` (API-key scopes, doc 10 §3 `resource:verb` list), `target_ids uuid[]`, `last_used_at`, `expires_at`, `revoked_at` | `UNIQUE prefix`; secret never stored (doc 07 §8); pushed to data planes via `RoutingUpsert` (doc 04 §8) |
 | `targets` | `id`, `slug`, `name`, `kind target_kind`, `credential_ref text` (URI, doc 08 §5.5), `data_plane_id text`, `merging_merge_id uuid`, `lease_expires_at`, `last_merge_id uuid`, `created_by`, `archived_at` | `UNIQUE (org_id, slug)`; `CHECK ((merging_merge_id IS NULL) = (lease_expires_at IS NULL))`; `INDEX (lease_expires_at) WHERE merging_merge_id IS NOT NULL` for `ExpiredLeaseScan`. **Decision:** the lease is columns on `targets` as doc 07 §5.4's `UPDATE` requires; no `merge_leases` table |
 | `target_settings` | `target_id` (PK, 1:1), `branch_ttl interval DEFAULT '24 hours'`, `held_ttl interval` (NULL = none), `overlay_retention interval DEFAULT '7 days'`, `compensation_retention interval DEFAULT '90 days'`, `revert_window interval DEFAULT '90 days'`, `uncovered_changeset_verdict verdict_outcome DEFAULT 'hold'` (doc 06 §5.1), `summary_values_allowed jsonb DEFAULT '{}'` (`{table: [column]}`, doc 05 §5.2), `assertion_budget_s int DEFAULT 60`, `assertion_timeout_s int DEFAULT 20`, `impact_timeout_s int DEFAULT 30`, `heartbeat_lost_after interval DEFAULT '5 minutes'`, `merge_lease interval DEFAULT '5 minutes'`, `merge_stall_budget interval DEFAULT '1 hour'`, `separate_approval bool DEFAULT true` | `CHECK (compensation_retention >= revert_window)` (doc 13 §9: compensation is never GC'd while revertable); `CHECK (uncovered_changeset_verdict IN ('hold','auto-merge'))` |
-| `target_memberships` | `target_id`, `principal_id`, `capability capability`, `granted_by` | PK `(org_id, target_id, principal_id, capability)`. `CHECK` via trigger: a principal of kind `agent` may not hold `policy_write` or `policy_admin` (doc 06 §8) |
+| `target_memberships` | `target_id`, `principal_id`, `capability capability`, `granted_by` | PK `(org_id, target_id, principal_id, capability)`. `CHECK` via trigger: a principal of kind `agent` may not hold `policy_admin` (doc 06 §8); the matching rule for the `policy:write` scope is on `api_keys.scopes` |
 | `adapters` | `id`, `target_id` (UNIQUE: doc 02 one adapter per target), `kind target_kind`, `version text`, `capabilities jsonb` (the `Capabilities` record of doc 08 §3.1), `catalog jsonb` (`TargetDescription`: tables, columns, types, PKs, `beforeImagesCheap`, last-modified marker; schema metadata, never rows), `catalog_digest bytea(32)`, `described_at` | `CHECK (pg_column_size(catalog) <= 4194304)` |
 | `impact_queries` | `id`, `target_id`, `name text` (slug), `sql text`, `timeout_s int DEFAULT 30`, `enabled bool`, `created_by` | `UNIQUE (target_id, name)`; metrics are named `<name>.<column>` (doc 05 §5.3) |
 | `create_intents` | `id uuid` (the candidate branch ID), `target_id`, `principal_id`, `idempotency_key`, `state create_intent_state`, `branch_id uuid` (set on commit) | `UNIQUE (org_id, principal_id, idempotency_key)`; `INDEX (inserted_at) WHERE state = 'pending'` for orphan reporting. `updated_at` only; doc 13 §6.1 |
@@ -370,7 +372,7 @@ One enum, `lifecycle_reason`, used by `branches.reason`, `changesets.superseded_
 | `policy_error` | doc 13 §6.3 f5, doc 06 | verdict reason (own enum); also `changeset.evaluated` payload |
 | `no_policy_coverage` | doc 06 §5.1 | verdict reason |
 | `revert_conflict` | doc 13 §6.6, doc 07 §5.2 | verdict reason |
-| `reject_with_retry` | doc 13 §2 (as "reject-with-retry"), §5 | branch `proposed → open`; changeset superseded |
+| `reject_with_retry` | doc 13 §2, §5 | branch `proposed → open`; changeset superseded |
 | `compute_failed` | doc 13 §6.3 f3 | changeset superseded; branch `proposed → open` |
 | `data_plane_unreachable` | doc 13 §6.5 f3 | merge `failed`; branch `merging → proposed` |
 | `compensation_failed` | doc 13 §6.5 f5–6, doc 09 §6 | merge `failed`; branch `merging → proposed` |
@@ -575,7 +577,7 @@ A failed `crc32c` ends the readable prefix; the crate truncates there on open, a
 
 ### 8.3 Overlay Parquet segment schema
 
-Exactly doc 05 §4.1. The compensation body (doc 09 §5.1) uses **this** schema; doc 09's `values, before_image` sketch is read as `after`/`before`.
+Exactly doc 05 §4.1. The compensation body (doc 09 §5.1) uses **this** schema with the same column names.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -617,7 +619,7 @@ CREATE TABLE routing (
   base_snapshot_ref  TEXT NOT NULL, overlay_path TEXT NOT NULL, credential_ref TEXT NOT NULL,
   believed_state     TEXT NOT NULL CHECK (believed_state IN ('open','proposed','merging','done','dead')),
   frozen             INTEGER NOT NULL DEFAULT 0,
-  terminal_reason    TEXT,                                       -- so a late connect gets SD003 with the right reason
+  terminal_reason    TEXT,                                       -- so a late connect gets the per-state terminal code (SD003/SD00A/SD00B/SD00C, doc 10 §4)
   policy_version_ids TEXT NOT NULL DEFAULT '[]',                 -- JSON array
   touched_tables     TEXT NOT NULL DEFAULT '[]',                 -- JSON array (doc 04 §4)
   updated_at INTEGER NOT NULL, last_heartbeat_reply_at INTEGER,
@@ -672,8 +674,8 @@ CREATE TABLE access_log (                                        -- doc 09 §8; 
 | Durable thing | Lives in | Default | Set by | GC job |
 |---|---|---|---|---|
 | Branch, changeset summary/impact, verdict, review, merge rows | Control-plane Postgres | Indefinite | — | None (doc 13 §9) |
-| Overlay (WAL tail, segments, manifest, freeze marker) after terminal state | Data plane | 7 days (`target_settings.overlay_retention`) | Control plane | `RetentionJob` (Oban) asks the data plane to `ReleaseOverlay` once terminal + retention; branch → `closed` on confirmation |
-| Row delta and assertion samples | Data-plane local disk | With the overlay | Control plane | `ReleaseOverlay` (doc 05 §5.7) |
+| Overlay (WAL tail, segments, manifest, freeze marker) after terminal state | Data plane | 7 days (`target_settings.overlay_retention`) | Control plane | `RetentionJob` (Oban) asks the data plane to `CloseOverlay` once terminal + retention; branch → `closed` on confirmation |
+| Row delta and assertion samples | Data-plane local disk | With the overlay | Control plane | `CloseOverlay` (doc 05 §5.7) |
 | Compensation body | Customer object store | 90 days (`compensation_retention`, ≥ `revert_window`) | Control plane computes `retention_until`; data plane enforces | Data-plane GC every 10 min (doc 09 §5.5) |
 | Compensation header | Customer object store | Permanent | — | Never (doc 09 §5.5) |
 | Orphan compensation record (no applied merge) | Customer object store | 7 days | Fixed | Data-plane GC |
@@ -761,7 +763,5 @@ erDiagram
 | Capability enum: doc 07 names `reviewer`, `policy_admin`, `target_admin`; doc 06 adds `policy_read`, `policy_write`. §2.1 includes all five; doc 10 must confirm the set | Control plane lead | Doc 10 |
 | `audit_log` default retention (2 years here) and whether it is exported to the customer's SIEM | Doc 15 owner | Doc 15 |
 | Large-object columns in the overlay (`blobs/<sha256>`, doc 05 §12): accept the digest-plus-blob layout in §8.1 | Engine lead | Doc 05 amendment |
-| WAL record format (§8.2) is new in this document; confirm `steward-overlay` adopts it or replaces it before the proxy benchmark gate | Proxy lead, engine lead | Before M0 |
-| Webhooks: in M0 at all, or is `NotifyPrincipal` email/SDK-poll only? Tables are defined so the choice is additive | Product | Doc 10, doc 11 |
 | Should `events.actor_principal_id` be mandatory for principal-initiated transitions, with a CHECK against `payload.actor`? | Control plane lead | Before M0 |
 | Per-adapter-kind defaults for `target_settings` (TTL, assertion budgets; doc 13 §12, doc 06 §12): a `target_kind_defaults` table or Helm values? | Founding team | Doc 14 |

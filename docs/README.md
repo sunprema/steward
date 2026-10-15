@@ -31,9 +31,9 @@ All component specs follow the template in `10-components/_template.md`.
 
 | # | Document | Status | Purpose |
 |---|----------|--------|---------|
-| 10 | API specification | Planned | REST/gRPC surface, auth model |
-| 11 | Agent SDK and MCP server | Planned | Tools agents call; Python/TS clients |
-| 12 | Data model and schemas | Planned | Control-plane schema, overlay layout, events |
+| 10 | [API specification](20-contracts/10-api-specification.md) | Draft | REST/gRPC surface, auth model |
+| 11 | [Agent SDK and MCP server](20-contracts/11-agent-sdk-and-mcp-server.md) | Draft | Tools agents call; Python/TS clients |
+| 12 | [Data model and schemas](20-contracts/12-data-model-and-schemas.md) | Draft | Control-plane schema, overlay layout, events |
 | 13 | [Branch and merge lifecycle](20-contracts/13-branch-and-merge-lifecycle.md) | Draft | State machine, checkpoints, conflicts, failures |
 
 ### 30 — Operations

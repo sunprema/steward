@@ -13,7 +13,7 @@ The policy engine is the control-plane component that turns a changeset into exa
 - Store policies and their immutable versions; assign version numbers on save.
 - Enforce the policy lifecycle and the `policy_admin` capability on activation.
 - Select the applicable policies for a changeset from its scope (tables, columns, principals, time windows).
-- Orchestrate evaluation: call the changeset engine's `run_assertions` with the pinned policy versions, collect results, compute the verdict.
+- Orchestrate evaluation: supply the pinned policy versions' assertions to the changeset engine's `ComputeChangeset` (which returns assertion results in `ChangesetReport`), or `RunAssertions` for re-evaluation only (§5.3), collect results, compute the verdict.
 - Record the verdict and every fired assertion, pinned to the policy versions used, so a verdict is reproducible for audit.
 - Run policy tests on save and in CI; refuse activation of a version with failing tests.
 - Capture review features (M0) so policy suggestions (M2+) can be computed later.
@@ -46,7 +46,7 @@ The policy engine is the control-plane component that turns a changeset into exa
 
 | Dependency | Mechanism | Assumption |
 |---|---|---|
-| Changeset engine `run_assertions` (doc 05) | gRPC over mTLS to the data plane, streamed results | Available most of the time; unreachable for minutes during a customer deploy. Latency dominated by DuckDB; budgeted in §7. Returns per-assertion `{assertion_id, status, count, sample_ref}` and nothing else |
+| Changeset engine `ComputeChangeset` (assertions folded in, results in `ChangesetReport`) and `RunAssertions` (re-evaluation only), doc 05 / doc 10 §5 | `Instruction` on the data-plane session stream (doc 10 §5), results reported on the same stream | Available most of the time; unreachable for minutes during a customer deploy. Latency dominated by DuckDB; budgeted in §7. Returns per-assertion `{assertion_id, status, count, sample_ref}` and nothing else |
 | Changeset engine `validate` (doc 05) | Rustler NIF, in-process, dirty scheduler | Pure function over SQL text; no I/O; < 5 ms |
 | Changeset engine test mode (doc 05) | Rustler NIF, in-memory DuckDB over fixture Parquet | Used only for policy tests with synthetic fixtures (doc 18 §7); never touches a target |
 | Metadata Postgres (doc 12) | Ecto | Source of truth for everything in §4; strongly consistent |
@@ -216,8 +216,8 @@ sequenceDiagram
     PE->>PG: 1. load changeset summary, branch principal, proposed_at; existing verdict?
     PE->>PG: 2. load active policy versions for target
     PE->>PE: 3. scope filter → applicable versions (may be empty)
-    PE->>CE: 4. run_assertions(changeset_id, [{assertion_id, sql, expect}], budget)
-    CE-->>PE: 5. stream {assertion_id, status, count, denominator, sample_ref, error_code}
+    PE->>CE: 4. ComputeChangeset carries [{assertion_id, sql, expect}], budget (RunAssertions on re-evaluation)
+    CE-->>PE: 5. ChangesetReport.assertion_results {assertion_id, status, count, denominator, sample_ref, error_code}
     PE->>PE: 6. combine → outcome + reason
     PE->>PG: 7. tx: insert verdict + verdict_assertions (unique on changeset_id)
     PE-->>BC: {:ok, verdict}
@@ -229,7 +229,7 @@ sequenceDiagram
 
 **Decision:** default `hold` with reason `no_policy_coverage` for M0, flippable per target to `auto-merge`. Justification: doc 01 §10 counts an unreviewed changeset reaching production that policy should have held as an incident, and a target with no policy yet is exactly where the buyer has not said what is safe. Holding costs one human look; auto-merging an uncovered table on day one costs trust. A customer who has consciously decided a target is low-risk flips the setting. The queue UI **should** label these entries "no policy covers this change" and offer "create a policy from this changeset", which is the first step of the queue shrinking itself.
 
-**Step 4.** One `run_assertions` call per changeset carrying every applicable assertion, with the data-plane budget (§7). The engine runs assertions concurrently as it sees fit and streams results as they finish. Sample keys for a failed assertion (up to 20 by default) are persisted in the data plane beside the row delta, keyed by `(changeset_id, assertion_id)`; the control plane receives only the `sample_ref`, and the queue UI fetches samples through the same short-lived grant used for the row delta (doc 03 §2). Keys are row data and do not cross the boundary.
+**Step 4.** The assertions travel with the `ComputeChangeset` instruction (one per changeset, carrying every applicable assertion, with the data-plane budget (§7)) and their results come back in `ChangesetReport`; `RunAssertions` is used only for re-evaluation against an existing row delta (§5.3). The engine runs assertions concurrently as it sees fit and streams results as they finish. Sample keys for a failed assertion (up to 20 by default) are persisted in the data plane beside the row delta, keyed by `(changeset_id, assertion_id)`; the control plane receives only the `sample_ref`, and the queue UI fetches samples through the same short-lived grant used for the row delta (doc 03 §2). Keys are row data and do not cross the boundary.
 
 **Step 6, combination.** Precedence is `block > hold > auto-merge`:
 
@@ -262,7 +262,7 @@ stateDiagram-v2
 
 ### 5.3 Re-evaluation after a policy change
 
-An Oban job (`ReevaluateJob`, keyed by `{target_id, policy_version_id}`, unique) selects every branch on the target in state `proposed` whose non-superseded changeset is `evaluated` with verdict `hold` and no `merge_wait` flag. For each, it asks the branch coordinator to create a new changeset in `computing` and mark the old one `superseded` in the same transaction (doc 13 §3), then evaluates per §5.1. The overlay is frozen and the base snapshot unchanged, so the row delta is identical; the changeset engine **may** serve the new changeset's row delta by aliasing the old one's digest rather than recomputing (doc 05). The old verdict and its queue entry history are kept for audit; the queue entry is replaced only if the new verdict is still `hold`.
+An Oban job (`ReevaluateJob`, keyed by `{target_id, policy_version_id}`, unique) selects every branch on the target in state `proposed` whose non-superseded changeset is `evaluated` with verdict `hold` and no `merge_wait` flag. For each, it asks the branch coordinator to create a new changeset in `computing` and mark the old one `superseded` in the same transaction (doc 13 §3), then evaluates per §5.1, using the `RunAssertions` instruction (doc 10 §5) against the existing row delta instead of a fresh `ComputeChangeset`. The overlay is frozen and the base snapshot unchanged, so the row delta is identical; the changeset engine **may** serve the new changeset's row delta by aliasing the old one's digest rather than recomputing (doc 05). The old verdict and its queue entry history are kept for audit; the queue entry is replaced only if the new verdict is still `hold`.
 
 Changesets with verdict `block` are not re-evaluated: their branch is already `rejected`, which is terminal (doc 13 §4), and the principal re-proposes from a new branch. Changesets with `auto-merge` are already `merging`.
 
@@ -304,7 +304,7 @@ The harness builds the `before`/`after`/`delta` relations in an in-memory DuckDB
 
 | Failure | Detection | Impact | Recovery |
 |---|---|---|---|
-| Data plane unreachable during `run_assertions` | gRPC connect/deadline error | No verdict; changeset stays `computing`; branch stays `proposed`; agent's propose call returns pending | Oban retries `evaluate` with backoff (30 s × 2ⁿ, cap 10 min, 12 attempts); then coordinator applies doc 13 §6.3 failure 3 (`compute_failed`) |
+| Data plane unreachable during `ComputeChangeset` / `RunAssertions` | gRPC connect/deadline error | No verdict; changeset stays `computing`; branch stays `proposed`; agent's propose call returns pending | Oban retries `evaluate` with backoff (30 s × 2ⁿ, cap 10 min, 12 attempts); then coordinator applies doc 13 §6.3 failure 3 (`compute_failed`) |
 | Single assertion exceeds its timeout | Engine returns status `error`, `error_code: timeout` | Verdict `hold`, reason `policy_error`; reviewer sees which assertion | Author rewrites the assertion; version marked `broken` in the UI until a later evaluation passes |
 | Whole policy set exceeds the data-plane budget | Engine cancels remaining assertions, returns them as `error: budget_exceeded` | Same as above | Raise `assertion_budget_s` for the target or split policies |
 | Assertion references a dropped table or column | `error_code: unknown_relation` / `unknown_column` | `hold`, `policy_error`; policy shown as broken in the policy list with the error | Author saves a new version; static check against the current catalog catches it at save |
@@ -313,7 +313,7 @@ The harness builds the `before`/`after`/`delta` relations in an in-memory DuckDB
 | Verdict insert races with a retry | Unique violation on `changeset_id` | None | Load and return the existing verdict |
 | Re-evaluation job runs while a reviewer is deciding | Review tx fails `changeset_superseded` (doc 13 §6.4) | Reviewer sees the new changeset | None needed |
 | Policy YAML on disk (CI mirror) diverges from Postgres | CI job compares digests | CI fails | Regenerate mirror from Postgres via `mix steward.policies.export` |
-| Data-plane routing store holds a stale policy set | Heartbeat reply carries active version ids; mismatch logged | None for correctness: `run_assertions` always carries the SQL bodies it needs | Heartbeat repairs within ~30 s |
+| Data-plane routing store holds a stale policy set | Heartbeat reply carries active version ids; mismatch logged | None for correctness: `ComputeChangeset` / `RunAssertions` always carry the SQL bodies they need | Heartbeat repairs within ~30 s |
 | Activation by a principal without `policy_admin` | Capability check | Refused with `forbidden`; audited | None |
 | Oban queue backlog | `oban_jobs` age metric | Verdict latency grows | Scale control-plane workers; §9 alert |
 
@@ -325,7 +325,7 @@ The harness builds the `before`/`after`/`delta` relations in an in-memory DuckDB
 | Data-plane assertion budget per policy set | Default 60 s total, per-target setting `assertion_budget_s`; per-assertion default 20 s, per-policy setting | Requirement (configurable) |
 | Policy save including static check and tests | p95 < 2 s for ≤ 10 tests with ≤ 1,000 fixture rows | Requirement |
 | Active policies per target | Designed for 500; UI and selection tested at 1,000 | Estimate |
-| Assertions per changeset | Typically 5–50 in scope; `run_assertions` payload < 1 MB | Estimate |
+| Assertions per changeset | Typically 5–50 in scope; assertion payload in `ComputeChangeset` / `RunAssertions` < 1 MB | Estimate |
 | Evaluations per customer per day | 100–10,000 at M0 | Estimate |
 | Re-evaluation fan-out after activation | ≤ held-queue size (hundreds); one Oban job per changeset, concurrency 10 per target | Estimate |
 | Verdict rows | One per changeset, indefinite retention (doc 13 §9); ~2 KB each plus ~200 B per `verdict_assertions` row | Estimate |
@@ -336,7 +336,7 @@ The control plane does no SQL parsing or DuckDB work on the evaluate path; the 5
 
 - **Policy SQL is customer-authored and executes in the customer's data plane.** The sandbox (read-only DuckDB over Parquet and snapshot reads, no extensions, no filesystem or network functions, memory and time limits) belongs to doc 05. The control plane's static check is defence in depth, not the boundary.
 - **Static check.** `validate` parses the statement with the `sqlparser` crate (DuckDB dialect) inside the engine crate and rejects anything that is not exactly one `SELECT` (with CTEs allowed); any relation outside `delta.*`, `before.*`, `after.*`, `summary.*`, `impact.*`; any table function other than an allowlisted set of aggregates and scalar functions; `ATTACH`, `COPY`, `PRAGMA`, `SET`, `INSTALL`, `LOAD`, `read_*`, and `glob`. The same function runs again in the data plane before execution so a tampered control plane cannot smuggle SQL past the sandbox. **Decision:** parsing lives in the engine crate and is reached from Elixir through the NIF rather than through an Elixir SQL parser, so the control plane and data plane use one parser and one allowlist.
-- **Authorisation.** Read and draft policies: any principal with `policy_read` / `policy_write` on the target. Activate and retire: `policy_admin`. Agents **must not** hold `policy_write` or `policy_admin` in M0 (an agent that can edit the policy that gates it is the failure mode the product exists to prevent); the capability model is doc 10's, the audit trail doc 15's.
+- **Authorisation.** Read and draft policies: any principal whose API key carries the scope `policy:read` / `policy:write` (these are API-key scopes in doc 10's `resource:verb` list, not membership capabilities). Activate and retire: the membership capability `policy_admin` (doc 07). Agents **must not** hold `policy:write` or `policy_admin` in M0 (an agent that can edit the policy that gates it is the failure mode the product exists to prevent); the capability model is doc 10's, the audit trail doc 15's.
 - **Trust boundary.** Downward: policy version ids and SQL bodies (customer-authored, no row data). Upward: assertion status, counts, denominators, error codes, sample refs. Sample keys never cross (§5.1).
 - **Never logged:** assertion result rows, sample keys, fixture rows from policy tests (synthetic, but the habit matters), target credentials. SQL text of assertions **may** be logged at debug level with the policy version id, because it is customer-authored policy, not customer row data; doc 15 confirms or overrides.
 
@@ -354,7 +354,7 @@ Metrics (Prometheus via Telemetry, labelled by target unless noted):
 
 Logs: one structured line per evaluation (`changeset_id`, `verdict_id`, outcome, reason, policy version ids, fired assertion ids, durations), one per lifecycle transition with the acting principal.
 
-Traces: `evaluate` is one span with a child span for `run_assertions` carrying the data-plane trace id, so a slow verdict can be attributed to one assertion.
+Traces: `evaluate` is one span with a child span for `ComputeChangeset` / `RunAssertions` carrying the data-plane trace id, so a slow verdict can be attributed to one assertion.
 
 **The three signals on call looks at first:** `policy_error_rate` (are policies breaking?), `evaluate_duration_ms` data-plane p99 (are assertions timing out?), and the held-queue trend per target (is the product working?).
 

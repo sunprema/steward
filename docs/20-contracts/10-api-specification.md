@@ -14,7 +14,7 @@ This document is the wire contract for the three surfaces through which anything
 | (b) Control ↔ data plane | gRPC over mTLS, one bidirectional stream per data plane | `steward-engine` (doc 05) as client; control plane gRPC host (doc 07, port 50051) as server | `contracts/proto/steward/plane/v1/session.proto` |
 | (c) Data-plane local | gRPC over Unix domain sockets | proxy ↔ engine, proxy/engine ↔ adapter host | `contracts/proto/steward/engine/v1/*.proto`, `contracts/proto/steward/adapter/v1/adapter.proto` |
 
-Surface (c) services, named here for completeness and **not** re-specified: `steward.engine.v1.Engine` (`ComputeChangeset`, `GetRowDelta`, `StalenessCheck`, `ComputeCompensation`, `Compact`, `ReleaseOverlay`; doc 05 §3.1), `steward.engine.v1.CompensationLog` (`Persist`, `Open`, `Release`, `Keys`, `Status`, `List`, `Verify`, `VerifyChain`, `SetRetention`, `SetLegalHold`, `Export`; doc 09 §3.1), `steward.engine.v1.ProxyFacts` (New: the proxy's per-branch facts report to the engine, doc 04 §5.6, previously unnamed), and `steward.adapter.v1.Adapter` (a one-to-one mirror of the Java `Connector`; doc 08 §3.1). Generated code is checked in per language under `contracts/gen/{rust,elixir,java,python,typescript}/`.
+Surface (c) services, named here for completeness and **not** re-specified: `steward.engine.v1.Engine` (`ComputeChangeset`, `GetRowDelta`, `StalenessCheck`, `ComputeCompensation`, `Compact`, `CloseOverlay`; doc 05 §3.1), `steward.engine.v1.CompensationLog` (`Persist`, `Open`, `Release`, `Keys`, `Status`, `List`, `Verify`, `VerifyChain`, `SetRetention`, `SetLegalHold`, `Export`; doc 09 §3.1), `steward.engine.v1.ProxyFacts` (New: the proxy's per-branch facts report to the engine, doc 04 §5.6, previously unnamed), and `steward.adapter.v1.Adapter` (a one-to-one mirror of the Java `Connector`; doc 08 §3.1). Generated code is checked in per language under `contracts/gen/{rust,elixir,java,python,typescript}/`.
 
 ## 2. Conventions
 
@@ -56,7 +56,7 @@ Stable, closed set. Lifecycle reasons and adapter codes are reused verbatim wher
 | 503 | `unavailable` | doc 06 §6 | Metadata Postgres unreachable |
 | 503 | `data_plane_unreachable` | doc 13 §6.5 | Create/propose/revert failed before checkpoint because the data plane did not answer |
 
-Response bodies that describe a terminal branch carry `reason` from the lifecycle set: `snapshot_lost`, `ttl_expired`, `compute_failed`, `stale_base`, `compensation_failed`, `data_plane_unreachable` (doc 13), or `review`, `verdict_block`, `principal` (New: the human/agent chose it). Verdict `reason` is doc 06's: `policies`, `policy_error`, `no_policy_coverage`, `revert_conflict`.
+Response bodies that describe a terminal branch carry `reason` from the lifecycle set: `snapshot_lost`, `ttl_expired`, `compute_failed`, `stale_base`, `compensation_failed`, `data_plane_unreachable` (doc 13), `review_rejected`, `verdict_block`, `abandoned_by_principal`, `merge_applied`, `retention_elapsed` (the canonical list is doc 12 §3 `lifecycle_reason`). Verdict `reason` is doc 06's: `policies`, `policy_error`, `no_policy_coverage`, `revert_conflict`.
 
 ## 3. Auth and principals
 
@@ -64,7 +64,7 @@ Principals are first-class (doc 02) with `kind ∈ agent | human | service` (doc
 
 ### 3.1 Agent and service credentials: API keys
 
-Format `stw_<prefix>_<secret>` (doc 07 §8; the task brief's `swk_` is superseded by the component spec, see Open questions). Stored as SHA-256 of the secret, prefix indexed. A key belongs to one principal, one org, and a set of targets, and carries capabilities:
+Format `stw_<prefix>_<secret>` (doc 07 §8; human short-lived tokens use `stwt_`). Stored as SHA-256 of the secret, prefix indexed. A key belongs to one principal, one org, and a set of targets, and carries capabilities:
 
 | Capability | Grants |
 |---|---|
@@ -75,6 +75,7 @@ Format `stw_<prefix>_<secret>` (doc 07 §8; the task brief's `swk_` is supersede
 | `review:decide` | Approve / reject (humans only in M0; a key for an agent **must not** carry it) |
 | `policy:read`, `policy:write`, `policy:admin` | doc 06 §8 `policy_read` / `policy_write` / `policy_admin`. Agents **must not** hold `policy:write` or `policy:admin` in M0 (doc 06 §8) |
 | `target:admin` | doc 07 `target_admin`: settings, memberships, retention, revert, impact queries |
+| `merge:revert` | Initiate a revert (`POST /v1/merges/{id}/revert`); for service principals, implied by `target:admin`; agent keys **must not** carry it in M0 (doc 13 §6.6) |
 | `audit:read` | List audit events |
 | `webhook:admin` | Register webhooks |
 
@@ -86,7 +87,7 @@ SSO (OIDC, doc 07 §8) establishes a Phoenix session; the LiveView UI calls the 
 
 ### 3.3 Row-delta grant
 
-`POST /v1/changesets/{changeset_id}/grants` (doc 07 says `/changesets/:id/grant`; plural chosen for consistency, see Open questions). Requires `review:read` on the target. Returns:
+`POST /v1/changesets/{changeset_id}/grants` (doc 07 §5.6). Requires `review:read` on the target. Returns:
 
 ```ts
 { grant: string /* ES256 JWT */, data_plane_url: string, expires_at: string }
@@ -153,11 +154,11 @@ type CreateBranchResponse = Branch & { connection_string: string /* postgresql:/
 | `POST /v1/branches` | `branch:write` | 201; 503 `data_plane_unreachable` | `[*] → open` (doc 13 §6.1). Retry with the same key after 503 generates fresh ids |
 | `GET /v1/branches/{id}` | `changeset:read` or owner | 200 | |
 | `GET /v1/branches?target_id=&state=&principal_id=` | `changeset:read` | 200 | |
-| `POST /v1/branches/{id}/propose` `{rationale?}` | `branch:propose`, owner | 202 with `{changeset_id, state: "computing"}` or 200 with the evaluated changeset when the verdict is recorded within 10 s | `open → proposed` (doc 13 §6.3). Non-owner → 403; not `open` → 409 `stale_transition` |
+| `POST /v1/branches/{id}/propose` `{rationale?}` | `branch:propose`, owner | Always 202 with `{changeset_id, state: "computing"}`; the client polls `GET /v1/changesets/{id}` and the verdict appears when `state` becomes `evaluated` (doc 13 §6.3) | `open → proposed` (doc 13 §6.3). Non-owner → 403; not `open` → 409 `stale_transition` |
 | `POST /v1/branches/{id}/withdraw` | owner | 200 | `proposed → open` |
-| `POST /v1/branches/{id}/abandon` | owner or `target:admin` | 200; 409 `merge_in_progress` | `open|proposed → abandoned`, reason `principal` |
+| `POST /v1/branches/{id}/abandon` | owner or `target:admin` | 200; 409 `merge_in_progress` | `open|proposed → abandoned`, reason `abandoned_by_principal` |
 
-The proxy's SQLSTATE codes an agent sees on the connection are doc 04's and are recorded here as the canonical table (doc 04 §12): `SD001 branch_frozen`, `SD002 branch_not_routable` (retryable, SDK retries 60 s), `SD003 branch_abandoned` (also merged/rejected/closed), `SD004 base_snapshot_gone`, `SD005 unsupported_statement`, `SD006 unclassifiable`, `SD007 proxy_unavailable`, `SD008 transaction_too_large`, `SD009 statement_too_large`.
+The proxy's SQLSTATE codes an agent sees on the connection are doc 04's and are recorded here as the canonical table (doc 04 §12): `SD001 branch_frozen`, `SD002 branch_not_routable` (retryable, SDK retries 60 s), `SD003 branch_merged`, `SD004 base_snapshot_gone`, `SD005 unsupported_statement`, `SD006 unclassifiable`, `SD007 proxy_unavailable`, `SD008 transaction_too_large`, `SD009 statement_too_large`, `SD00A branch_rejected`, `SD00B branch_abandoned`, `SD00C branch_closed`. The four terminal codes (`SD003`, `SD00A`, `SD00B`, `SD00C`) are distinct so the SDK derives the terminal state from the code, never from the message text.
 
 ### 4.3 Changesets
 
@@ -212,7 +213,7 @@ type Merge = { id: string; changeset_id: string; branch_id: string; target_id: s
 |---|---|---|---|
 | `GET /v1/merges/{id}` | `changeset:read` | 200 | |
 | `GET /v1/targets/{id}/merges?status=` | `changeset:read` | 200 | |
-| `POST /v1/merges/{id}/revert` `{rationale?}` | `target:admin` | 201 `Branch` with `revert_of`; 409 `compensation_unavailable` | `[*] → open (revert_of=M)` then auto-propose (doc 13 §6.6). Path kept as doc 13 writes it |
+| `POST /v1/merges/{id}/revert` `{rationale?}` | membership capability `target_admin`, or API-key scope `merge:revert` held by a service principal; agents do not hold it in M0 | 201 `Branch` with `revert_of`; 409 `compensation_unavailable` | `[*] → open (revert_of=M)` then auto-propose (doc 13 §6.6). Path kept as doc 13 writes it |
 | `PATCH /v1/merges/{id}/compensation` `{legal_hold: boolean}` | `target:admin` | 200 | Per-record legal hold (doc 09 §12); delivered by `SetLegalHold` on the session |
 
 ### 4.6 Policies
@@ -259,7 +260,7 @@ type ApiKey = { id: string; principal_id: string; prefix: string; targets: strin
 
 ## 5. Control ↔ data plane: `steward.plane.v1.Session`
 
-**Decision: one bidirectional stream, opened by the data plane.** The control plane never needs inbound network access to the customer's cloud; the customer's egress rule is one hostname on 443. Docs 04, 05, and 07 describe control-plane-initiated calls (`InitialiseOverlay`, `FreezeWrites`, `ComputeChangeset`, `Merge`, `CloseOverlay`, `RoutingUpsert`); those become `Instruction` messages on the stream with a correlation id, and the data plane answers with `InstructionResult` on the same stream, so the timeouts of doc 07 §3.2 (freeze 2 s, overlay init 10 s, others 5 s; compute deadline 15 min) are enforced by the control plane as reply deadlines, not transport timeouts. If the stream is down the instruction is queued per the retry budgets in doc 13 §6 and re-sent on reconnect; the heartbeat matrix repairs the rest. A data plane **must** keep exactly one stream open per data-plane identity and reconnect with jittered backoff (1 s → 60 s).
+**Decision: one bidirectional stream, opened by the data plane.** The control plane never needs inbound network access to the customer's cloud; the customer's egress rule is one hostname on 443. Docs 04, 05, and 07 name the control-plane-originated calls (`InitialiseOverlay`, `FreezeWrites`, `ComputeChangeset`, `Merge`, `CloseOverlay`, `RoutingUpsert`); those are `Instruction` messages on the stream with a correlation id, and the data plane answers with `InstructionResult` on the same stream, so the timeouts of doc 07 §3.2 (freeze 2 s, overlay init 10 s, others 5 s; compute deadline 15 min) are enforced by the control plane as reply deadlines, not transport timeouts. If the stream is down the instruction is queued per the retry budgets in doc 13 §6 and re-sent on reconnect; the heartbeat matrix repairs the rest. A data plane **must** keep exactly one stream open per data-plane identity and reconnect with jittered backoff (1 s → 60 s).
 
 ```protobuf
 syntax = "proto3";
@@ -364,11 +365,11 @@ message Instruction {
   oneof body {
     InitialiseOverlay initialise_overlay = 2;   // doc 13 §6.1 step 2
     RoutingUpsert routing_upsert = 3;           // doc 04 §3.1; also API-key provisioning/revocation
-    FreezeWrites freeze_writes = 4;             // doc 13 §6.3 step 2 (doc 04 "Freeze")
+    FreezeWrites freeze_writes = 4;             // doc 13 §6.3 step 2 (doc 04 §5.4)
     ComputeChangeset compute_changeset = 5;     // doc 05 §3.1
     RunAssertions run_assertions = 6;           // doc 06 §5.3 re-evaluation against an existing row delta
     Merge merge = 7;                            // doc 13 §6.5 step 3
-    CloseOverlay close_overlay = 8;             // doc 05 ReleaseOverlay, after closed/unknown
+    CloseOverlay close_overlay = 8;             // doc 05 §5.7, after closed/unknown
     SetRetention set_retention = 9;             // doc 09 §3.1
     SetLegalHold set_legal_hold = 10;
   }
@@ -503,10 +504,7 @@ GET /v1/changesets/0192f3b…  → {"conflicts_count":3,"verdict":{"outcome":"ho
 
 | Question | Owner | Needed by |
 |---|---|---|
-| API key prefix: doc 07 §8 says `stw_<prefix>_<secret>`; the doc 10 brief said `swk_`. This document follows doc 07. Confirm. | Founding team | Before doc 11 |
-| Grant endpoint path: doc 07 §5.6 names `POST /changesets/:id/grant`; this document uses `/v1/changesets/{id}/grants`. Amend doc 07 or revert here. | Control plane lead | Doc 07 amendment |
-| Instruction naming: doc 04 says `Freeze`, doc 07 `FreezeWrites`; doc 05 `ReleaseOverlay`, doc 07 `CloseOverlay`; doc 06 `run_assertions` as a separate RPC, doc 05 folds assertions into `ComputeChangeset`. This document uses `FreezeWrites`, `CloseOverlay`, and both `ComputeChangeset` (with assertions) and `RunAssertions` (re-evaluation only). Confirm and amend docs 04/05/06. | Founding team | Before `contracts/` is frozen |
-| Bidirectional stream versus the "data-plane gateway" of doc 05 §3.1 / doc 14: with the stream, is a gateway still needed for anything other than the grant endpoint? | Architecture | Doc 14 |
+| With the session stream carrying all instructions, is a data-plane gateway (doc 14) still needed for anything other than the grant endpoint? | Architecture | Doc 14 |
 | Rate-limit defaults (§2) are guesses; should mutating limits be per target rather than per key? | Control plane lead | Before M0 |
 | Human short-lived API tokens (`stwt_`, 1 h): is this in M0 or do humans use the UI only? | Product | Doc 11 |
 | Legal hold API shape: per record (`PATCH /v1/merges/{id}/compensation`) and per target (`settings.legal_hold`) are both specified; who may set them and whether object-store object lock is also applied (doc 09 §12). | Product, Control plane lead | Doc 15 |

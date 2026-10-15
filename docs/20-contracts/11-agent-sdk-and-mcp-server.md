@@ -161,7 +161,10 @@ The SDK wraps the driver's error when its SQLSTATE is in the `SD` class (doc 04 
 |---|---|---|---|
 | `SD001` | `branch_frozen` | `BranchFrozen` | No; branch is `proposed` or later |
 | `SD002` | `branch_not_routable` | `BranchNotRoutable` | Yes; the SDK retries connect for up to 60 s with 1 s → 5 s backoff (doc 13 §6.1 failure 6) |
-| `SD003` | `branch_abandoned` (also merged / rejected / closed, doc 04 §5.1) | `BranchTerminal` with `state` parsed from the message | No |
+| `SD003` | `branch_merged` | `BranchTerminal` with `state = merged` (from the code, not the message) | No |
+| `SD00A` | `branch_rejected` | `BranchTerminal` with `state = rejected` | No |
+| `SD00B` | `branch_abandoned` | `BranchTerminal` with `state = abandoned` | No |
+| `SD00C` | `branch_closed` | `BranchTerminal` with `state = closed` | No |
 | `SD004` | `base_snapshot_gone` | `BaseSnapshotGone` | No; the agent creates a new branch (doc 13 §6.2 failure 3) |
 | `SD005` | `unsupported_statement` | `UnsupportedStatement` with `reason` from the message | No |
 | `SD006` | `unclassifiable` | `UnclassifiableStatement` | No |
@@ -193,7 +196,7 @@ Retry policy for API calls: exponential backoff 0.5 s × 2ⁿ with full jitter, 
 
 ## 5. Waiting for verdicts
 
-`propose()` returns when the control plane returns `{changeset_id, verdict, reasons}` (doc 13 §6.3 step 10). The API may instead return the changeset in `computing` if the compute budget is still running; the SDK then polls `GET /v1/changesets/{id}` with backoff 1 s → 2 s → 5 s → 10 s (cap) until `evaluated` or `timeout`, which raises `ChangesetTimeout` and leaves the branch `proposed`.
+`POST /v1/branches/{id}/propose` is asynchronous and always answers `202 {changeset_id, state: "computing"}` (doc 10 §4, doc 13 §6.3); `propose()` then polls `GET /v1/changesets/{id}` with backoff 1 s → 2 s → 5 s → 10 s (cap) until `evaluated` or `timeout`, which raises `ChangesetTimeout` and leaves the branch `proposed`.
 
 `wait()` semantics, by verdict at the time of the call:
 
@@ -222,7 +225,7 @@ merge = client.merge(merge_id); merge.status   # pending | applied | compensated
 
 ## 7. Admin namespace
 
-Agents **must not** hold `policy_write` or `policy_admin` in M0 (doc 06 §8). The SDK therefore keeps everything that needs a capability beyond "branch on this target" out of the default surface and under `client.admin`, which is identical code with a different key: policy CRUD, `activate`, `retire`, `run_tests`, impact-query registration, target settings (`branch_ttl`, `uncovered_changeset_verdict`), review decisions, revert. The namespace exists for CI and automation (§12.3) and the key used **should** be a service principal, not an agent's. The MCP server does not expose any admin operation (§8).
+Agents **must not** hold the `policy:write` scope or the `policy_admin` capability in M0 (doc 06 §8). The SDK therefore keeps everything that needs a capability beyond "branch on this target" out of the default surface and under `client.admin`, which is identical code with a different key: policy CRUD, `activate`, `retire`, `run_tests`, impact-query registration, target settings (`branch_ttl`, `uncovered_changeset_verdict`), review decisions, revert. The namespace exists for CI and automation (§12.3) and the key used **should** be a service principal, not an agent's. The MCP server does not expose any admin operation (§8).
 
 ## 8. The MCP server
 
@@ -364,9 +367,7 @@ console.log(`reverted; merge ${cs.merge!.id} ${cs.merge!.status}`);
 |---|---|---|
 | Auto-propose on clean exit (§2.3) versus requiring an explicit `propose()`: auto keeps the three-call promise; explicit avoids proposing after an agent that merely exited early without raising. Recommendation: auto, with `on_exit="keep"` documented prominently | Founding team | Before SDK 1.0 |
 | Split `steward_run_sql` into `steward_read_sql` and `steward_write_sql` so a host can expose read-only tools to some models? Recommendation: ship one tool in M0, add a `read_only: true` server flag that makes writes fail before the proxy | Product, proxy lead | M0 MCP release |
-| Does `POST /v1/branches/{id}/propose` return `computing` when the compute budget is still running, or block up to a deadline? Decides whether §5's propose polling is needed | API lead (doc 10) | Doc 10 |
 | Reviewer note delivery: doc 13 §5 says it rides "the propose response that was rejected", but propose has returned before the review exists; this document delivers it via `GET /v1/changesets/{id}` `review.note` and webhooks. Confirm | Control plane lead | Doc 10 |
 | Ship the PyPI `steward-mcp` launcher at all, given it requires Node? Alternative: document `npx steward-mcp` only | Founding team | M0 MCP release |
 | `task_id`: field name and whether it is a branch attribute or evidence metadata in doc 12 | API lead | Doc 10, doc 12 |
 | Webhook event names and signature scheme (§5) are assumed; doc 10 defines them | API lead | Doc 10 |
-| Should `SD003` carry distinct SQLSTATEs per terminal state so `BranchTerminal.state` does not depend on parsing the message? | Proxy lead | Doc 10 error table |
