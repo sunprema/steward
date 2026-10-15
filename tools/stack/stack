@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# tools/stack — the Steward local stack (doc 18 §8, doc 17 §5).
+#
+#   stack up        compose up -d, wait for health, load fixtures, print DSNs
+#   stack down      stop the stack (volumes kept)
+#   stack reset     down -v, then up (clean databases between scenarios)
+#   stack ps        service status
+#   stack logs [svc...]   follow logs
+#   stack psql control|target [psql args...]
+#
+# Env: STEWARD_FIXTURE_SIZE (s|m|l|xl, default s) selects the fixture size
+# loaded into target-db on `up`. tools/stack/.env is sourced if present.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOLS="$(cd "$HERE/.." && pwd)"
+COMPOSE_FILE="$HERE/docker-compose.yml"
+
+if [[ -f "$HERE/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$HERE/.env"
+  set +a
+fi
+
+: "${CONTROL_DB_PORT:=5433}" "${CONTROL_DB_NAME:=steward_control}"
+: "${CONTROL_DB_USER:=steward}" "${CONTROL_DB_PASSWORD:=steward}"
+: "${TARGET_DB_PORT:=5434}" "${TARGET_DB_NAME:=retail}"
+: "${TARGET_DB_USER:=retail}" "${TARGET_DB_PASSWORD:=retail}"
+: "${STEWARD_ADAPTER_PASSWORD:=steward_adapter}"
+: "${MINIO_API_PORT:=9000}" "${MINIO_CONSOLE_PORT:=9001}"
+: "${MINIO_ROOT_USER:=steward}" "${MINIO_ROOT_PASSWORD:=stewardsteward}" "${MINIO_BUCKET:=steward}"
+: "${STEWARD_FIXTURE_SIZE:=s}"
+
+CONTROL_DSN="postgres://${CONTROL_DB_USER}:${CONTROL_DB_PASSWORD}@localhost:${CONTROL_DB_PORT}/${CONTROL_DB_NAME}"
+TARGET_DSN="postgres://${TARGET_DB_USER}:${TARGET_DB_PASSWORD}@localhost:${TARGET_DB_PORT}/${TARGET_DB_NAME}"
+ADAPTER_DSN="postgres://steward_adapter:${STEWARD_ADAPTER_PASSWORD}@localhost:${TARGET_DB_PORT}/${TARGET_DB_NAME}"
+
+compose() { docker compose -f "$COMPOSE_FILE" "$@"; }
+
+die() { echo "stack: $*" >&2; exit 1; }
+log() { echo "==> $*"; }
+
+require_docker() {
+  command -v docker >/dev/null 2>&1 || die "docker not found"
+  docker compose version >/dev/null 2>&1 || die "docker compose v2 not found"
+  docker info >/dev/null 2>&1 || die "docker daemon not reachable"
+}
+
+# Wait until every service with a healthcheck reports healthy (or exited 0 for
+# one-shots). Compose's --wait does this too, but printing progress is nicer
+# and `--wait` is not present on every 2.x.
+wait_healthy() {
+  local deadline=$((SECONDS + 120))
+  local pending
+  while :; do
+    pending=""
+    for svc in control-db target-db minio; do
+      local cid status
+      cid="$(compose ps -q "$svc" 2>/dev/null || true)"
+      [[ -n "$cid" ]] || { pending+=" $svc(missing)"; continue; }
+      status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid")"
+      [[ "$status" == "healthy" ]] || pending+=" $svc($status)"
+    done
+    local init_cid init_state
+    init_cid="$(compose ps -a -q minio-init 2>/dev/null || true)"
+    if [[ -n "$init_cid" ]]; then
+      init_state="$(docker inspect -f '{{.State.Status}}/{{.State.ExitCode}}' "$init_cid")"
+      [[ "$init_state" == "exited/0" ]] || pending+=" minio-init($init_state)"
+    fi
+    [[ -z "$pending" ]] && return 0
+    (( SECONDS < deadline )) || die "timed out waiting for:$pending"
+    printf '\r    waiting:%s   ' "$pending"
+    sleep 2
+  done
+}
+
+print_dsns() {
+  cat <<EOF
+
+Steward local stack is up.
+
+  control-db  ${CONTROL_DSN}
+  target-db   ${TARGET_DSN}
+              ${ADAPTER_DSN}   (least-privilege role, doc 08 §8)
+  minio       http://localhost:${MINIO_API_PORT}  (console http://localhost:${MINIO_CONSOLE_PORT}, bucket ${MINIO_BUCKET})
+              access key ${MINIO_ROOT_USER} / secret ${MINIO_ROOT_PASSWORD}
+
+  fixtures    size ${STEWARD_FIXTURE_SIZE} loaded into target-db (tools/fixtures/load)
+
+Steward components (proxy :5432, control :4000/:50051) are enabled in
+docker-compose.yml as each milestone lands.
+EOF
+}
+
+cmd_up() {
+  require_docker
+  log "starting control-db, target-db, minio"
+  compose up -d --remove-orphans
+  log "waiting for healthchecks"
+  wait_healthy
+  echo
+  log "loading fixtures (size ${STEWARD_FIXTURE_SIZE}) into target-db"
+  STEWARD_ADAPTER_PASSWORD="$STEWARD_ADAPTER_PASSWORD" \
+    "$TOOLS/fixtures/load" --size "$STEWARD_FIXTURE_SIZE" --dsn "$TARGET_DSN"
+  print_dsns
+}
+
+cmd_down() { require_docker; compose down --remove-orphans "$@"; }
+
+cmd_reset() {
+  require_docker
+  log "removing containers and volumes"
+  compose down -v --remove-orphans
+  cmd_up
+}
+
+cmd_psql() {
+  local which="${1:-}"; shift || true
+  local dsn
+  case "$which" in
+    control) dsn="$CONTROL_DSN" ;;
+    target)  dsn="$TARGET_DSN" ;;
+    adapter) dsn="$ADAPTER_DSN" ;;
+    *) die "usage: stack psql control|target|adapter [psql args...]" ;;
+  esac
+  if command -v psql >/dev/null 2>&1; then
+    exec psql "$dsn" "$@"
+  fi
+  # No local psql: run it inside the container.
+  require_docker
+  local svc user db pw
+  case "$which" in
+    control) svc=control-db; user="$CONTROL_DB_USER"; db="$CONTROL_DB_NAME"; pw="$CONTROL_DB_PASSWORD" ;;
+    target)  svc=target-db;  user="$TARGET_DB_USER";  db="$TARGET_DB_NAME";  pw="$TARGET_DB_PASSWORD" ;;
+    adapter) svc=target-db;  user=steward_adapter;    db="$TARGET_DB_NAME";  pw="$STEWARD_ADAPTER_PASSWORD" ;;
+  esac
+  exec docker compose -f "$COMPOSE_FILE" exec -e PGPASSWORD="$pw" "$svc" psql -U "$user" -d "$db" "$@"
+}
+
+usage() {
+  sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    up)     cmd_up "$@" ;;
+    down)   cmd_down "$@" ;;
+    reset)  cmd_reset "$@" ;;
+    ps)     require_docker; compose ps -a "$@" ;;
+    logs)   require_docker; compose logs -f "$@" ;;
+    psql)   cmd_psql "$@" ;;
+    -h|--help|help|"") usage 0 ;;
+    *) echo "stack: unknown command '$cmd'" >&2; usage 2 ;;
+  esac
+}
+
+main "$@"

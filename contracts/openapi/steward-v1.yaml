@@ -1,0 +1,3402 @@
+openapi: 3.1.0
+info:
+  title: Steward public API
+  version: 1.0.0
+  summary: The /v1 REST surface of the Steward control plane (doc 10 §4).
+  description: |
+    JSON over HTTPS, snake_case keys, RFC 3339 timestamps, UUIDv7 ids. Unknown request keys are rejected
+    with `invalid_request`. Every mutating POST carries `Idempotency-Key` (24 h replay window; replays carry
+    `Idempotent-Replayed: true`). Every response carries `X-Request-Id`, `RateLimit-Limit`,
+    `RateLimit-Remaining` and `RateLimit-Reset`. Changes to this document are additive within v1 (doc 10 §2).
+  license:
+    name: Proprietary
+servers:
+  - url: https://api.{region}.steward.dev/v1
+    description: Control plane, per region.
+    variables:
+      region:
+        default: eu-west-1
+security:
+  - apiKey: []
+  - humanToken: []
+tags:
+  - name: auth
+  - name: targets
+  - name: branches
+  - name: changesets
+  - name: reviews
+  - name: merges
+  - name: policies
+  - name: impact-queries
+  - name: principals
+  - name: audit
+  - name: webhooks
+  - name: data-planes
+
+paths:
+  # ---------------------------------------------------------------- auth
+  /auth/tokens:
+    post:
+      tags: [auth]
+      operationId: createHumanToken
+      summary: Exchange an SSO session for a 1 h human API token (stwt_...).
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: Token issued; shown once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanToken'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ---------------------------------------------------------------- targets
+  /targets:
+    post:
+      tags: [targets]
+      operationId: createTarget
+      summary: Register a target; the data plane runs describe() asynchronously (cap target:admin).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/CreateTarget'
+      responses:
+        '201':
+          description: Target registered with status `registering`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [targets]
+      operationId: listTargets
+      summary: List targets the caller holds any capability on.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of targets.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TargetPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /targets/{target_id}:
+    parameters:
+      - $ref: '#/components/parameters/TargetId'
+    get:
+      tags: [targets]
+      operationId: getTarget
+      summary: Get one target.
+      responses:
+        '200':
+          description: The target.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /targets/{target_id}/settings:
+    parameters:
+      - $ref: '#/components/parameters/TargetId'
+    patch:
+      tags: [targets]
+      operationId: patchTargetSettings
+      summary: Partially update target settings (cap target:admin); retention and legal-hold changes propagate to the data plane.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetSettingsPatch'
+      responses:
+        '200':
+          description: Updated target.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /targets/{target_id}/schema:
+    parameters:
+      - $ref: '#/components/parameters/TargetId'
+    get:
+      tags: [targets]
+      operationId: getTargetSchema
+      summary: Cached TargetDescription from the adapter's describe() (schema metadata, never rows).
+      responses:
+        '200':
+          description: Target description.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TargetDescription'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /targets/{target_id}/queue:
+    parameters:
+      - $ref: '#/components/parameters/TargetId'
+    get:
+      tags: [targets, reviews]
+      operationId: getReviewQueue
+      summary: Review queue entries for the target, oldest first, keyset (entered_at, id) (cap review:read).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of queue entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueEntryPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /targets/{target_id}/merges:
+    parameters:
+      - $ref: '#/components/parameters/TargetId'
+    get:
+      tags: [merges]
+      operationId: listTargetMerges
+      summary: List merges on a target, newest first (cap changeset:read).
+      parameters:
+        - name: status
+          in: query
+          description: Filter by merge status.
+          schema:
+            $ref: '#/components/schemas/MergeStatus'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of merges.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergePage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /targets/{target_id}/policies:
+    parameters:
+      - $ref: '#/components/parameters/TargetId'
+    post:
+      tags: [policies]
+      operationId: createPolicy
+      summary: Create a policy from YAML as version 1 in draft (cap policy:write).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/PolicyYaml'
+      responses:
+        '201':
+          description: Policy created; `active_version` is null until a version is activated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyWithVersion'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/PolicyInvalid' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [policies]
+      operationId: listTargetPolicies
+      summary: List policies on a target (cap policy:read).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of policies.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /targets/{target_id}/impact-queries:
+    parameters:
+      - $ref: '#/components/parameters/TargetId'
+    post:
+      tags: [impact-queries]
+      operationId: createImpactQuery
+      summary: Add an impact query; static check requires a single SELECT (cap target:admin).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateImpactQuery'
+      responses:
+        '201':
+          description: Impact query created; applies to changesets proposed after now.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImpactQuery'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/PolicyInvalid' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [impact-queries]
+      operationId: listImpactQueries
+      summary: List impact queries on a target (cap policy:read).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of impact queries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImpactQueryPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /targets/{target_id}/memberships:
+    parameters:
+      - $ref: '#/components/parameters/TargetId'
+    post:
+      tags: [principals]
+      operationId: createMembership
+      summary: Grant a human membership capability on a target (cap target:admin).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Membership'
+      responses:
+        '201':
+          description: Membership granted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipRecord'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [principals]
+      operationId: listMemberships
+      summary: List memberships on a target (cap target:admin).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of memberships.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /targets/{target_id}/memberships/{principal_id}/{capability}:
+    parameters:
+      - $ref: '#/components/parameters/TargetId'
+      - $ref: '#/components/parameters/PrincipalId'
+      - name: capability
+        in: path
+        required: true
+        description: Membership capability to revoke.
+        schema:
+          $ref: '#/components/schemas/MembershipCapability'
+    delete:
+      tags: [principals]
+      operationId: deleteMembership
+      summary: Revoke one membership capability (cap target:admin); idempotent.
+      responses:
+        '204':
+          description: Revoked (or already absent).
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ---------------------------------------------------------------- branches
+  /branches:
+    post:
+      tags: [branches]
+      operationId: createBranch
+      summary: Create a branch ([*] → open); returns the proxy connection string (cap branch:write).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBranch'
+      responses:
+        '201':
+          description: Branch open; `connection_string` is returned only here.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateBranchResponse'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    get:
+      tags: [branches]
+      operationId: listBranches
+      summary: List branches (cap changeset:read).
+      parameters:
+        - name: target_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/Id'
+        - name: state
+          in: query
+          schema:
+            $ref: '#/components/schemas/BranchState'
+        - name: principal_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/Id'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of branches.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchPage'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /branches/{branch_id}:
+    parameters:
+      - $ref: '#/components/parameters/BranchId'
+    get:
+      tags: [branches]
+      operationId: getBranch
+      summary: Get a branch (cap changeset:read or owner).
+      responses:
+        '200':
+          description: The branch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Branch'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /branches/{branch_id}/propose:
+    parameters:
+      - $ref: '#/components/parameters/BranchId'
+    post:
+      tags: [branches]
+      operationId: proposeBranch
+      summary: Freeze writes and compute a changeset (open → proposed); always 202, poll the changeset (cap branch:propose, owner).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Rationale'
+      responses:
+        '202':
+          $ref: '#/components/responses/Proposed'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /branches/{branch_id}/withdraw:
+    parameters:
+      - $ref: '#/components/parameters/BranchId'
+    post:
+      tags: [branches]
+      operationId: withdrawBranch
+      summary: Withdraw a proposal (proposed → open, reason withdrawn); owner only.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Branch back in open.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Branch'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /branches/{branch_id}/abandon:
+    parameters:
+      - $ref: '#/components/parameters/BranchId'
+    post:
+      tags: [branches]
+      operationId: abandonBranch
+      summary: Abandon a branch (open|proposed → abandoned, reason abandoned_by_principal); owner or target:admin.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Branch abandoned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Branch'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /branches/{branch_id}/changesets:
+    parameters:
+      - $ref: '#/components/parameters/BranchId'
+    get:
+      tags: [changesets]
+      operationId: listBranchChangesets
+      summary: Changesets of a branch, newest first, superseded included (cap changeset:read).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of changesets.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChangesetPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ---------------------------------------------------------------- changesets
+  /changesets/{changeset_id}:
+    parameters:
+      - $ref: '#/components/parameters/ChangesetId'
+    get:
+      tags: [changesets]
+      operationId: getChangeset
+      summary: Get a changeset; `summary.columns[].distinct_values` only for callers with review:read (cap changeset:read).
+      responses:
+        '200':
+          description: The changeset.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Changeset'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /changesets/{changeset_id}/verdict:
+    parameters:
+      - $ref: '#/components/parameters/ChangesetId'
+    get:
+      tags: [changesets, policies]
+      operationId: getChangesetVerdict
+      summary: Get the verdict of an evaluated changeset (cap changeset:read).
+      responses:
+        '200':
+          description: The verdict.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Verdict'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /changesets/{changeset_id}/grants:
+    parameters:
+      - $ref: '#/components/parameters/ChangesetId'
+    post:
+      tags: [changesets]
+      operationId: createGrant
+      summary: Issue a 5-minute ES256 grant for the data plane's row-delta endpoints (cap review:read).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGrant'
+      responses:
+        '201':
+          description: Grant issued; recorded as a `grant.issued` event.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Grant'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /changesets/{changeset_id}/reviews:
+    parameters:
+      - $ref: '#/components/parameters/ChangesetId'
+    post:
+      tags: [reviews]
+      operationId: createReview
+      summary: Record a review decision (cap review:decide, not the owning principal); drives proposed → merging|rejected|open.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReview'
+      responses:
+        '201':
+          description: Review recorded (permanent).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Review'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '501': { $ref: '#/components/responses/ReviewEditNotSupported' }
+    get:
+      tags: [reviews]
+      operationId: listReviews
+      summary: List review records of a changeset (cap review:read).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of reviews.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ---------------------------------------------------------------- merges
+  /merges:
+    get:
+      tags: [merges]
+      operationId: listMerges
+      summary: List merges, filterable by changeset (cap changeset:read).
+      parameters:
+        - name: changeset_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/Id'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/MergeStatus'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of merges.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergePage'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /merges/{merge_id}:
+    parameters:
+      - $ref: '#/components/parameters/MergeId'
+    get:
+      tags: [merges]
+      operationId: getMerge
+      summary: Get a merge with progress and compensation status (cap changeset:read).
+      responses:
+        '200':
+          description: The merge.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Merge'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /merges/{merge_id}/revert:
+    parameters:
+      - $ref: '#/components/parameters/MergeId'
+    post:
+      tags: [merges]
+      operationId: revertMerge
+      summary: Open a revert branch from the compensation record and auto-propose it (membership target_admin or scope merge:revert).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Rationale'
+      responses:
+        '201':
+          description: Revert branch created with `revert_of` set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Branch'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /merges/{merge_id}/compensation:
+    parameters:
+      - $ref: '#/components/parameters/MergeId'
+    patch:
+      tags: [merges]
+      operationId: patchMergeCompensation
+      summary: Set or clear the per-record legal hold; delivered to the data plane by SetLegalHold (cap target:admin).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompensationPatch'
+      responses:
+        '200':
+          description: Updated merge.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Merge'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ---------------------------------------------------------------- policies
+  /policies/{policy_id}:
+    parameters:
+      - $ref: '#/components/parameters/PolicyId'
+    get:
+      tags: [policies]
+      operationId: getPolicy
+      summary: Get a policy (cap policy:read).
+      responses:
+        '200':
+          description: The policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /policies/{policy_id}/versions:
+    parameters:
+      - $ref: '#/components/parameters/PolicyId'
+    get:
+      tags: [policies]
+      operationId: listPolicyVersions
+      summary: List versions of a policy, newest first (cap policy:read).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of versions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersionPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    post:
+      tags: [policies]
+      operationId: createPolicyVersion
+      summary: Save version N+1 in draft and run its tests (cap policy:write).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/PolicyYaml'
+      responses:
+        '201':
+          description: Draft version saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersion'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/PolicyInvalid' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /policies/{policy_id}/versions/{version}:
+    parameters:
+      - $ref: '#/components/parameters/PolicyId'
+      - $ref: '#/components/parameters/PolicyVersionNumber'
+    get:
+      tags: [policies]
+      operationId: getPolicyVersion
+      summary: Get one policy version (cap policy:read).
+      responses:
+        '200':
+          description: The version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersion'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /policies/{policy_id}/versions/{version}/activate:
+    parameters:
+      - $ref: '#/components/parameters/PolicyId'
+      - $ref: '#/components/parameters/PolicyVersionNumber'
+    post:
+      tags: [policies]
+      operationId: activatePolicyVersion
+      summary: Activate a draft version whose tests pass; retires the previous active version (cap policy:admin).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Version active.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersion'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /policies/{policy_id}/versions/{version}/test-run:
+    parameters:
+      - $ref: '#/components/parameters/PolicyId'
+      - $ref: '#/components/parameters/PolicyVersionNumber'
+    post:
+      tags: [policies]
+      operationId: runPolicyTests
+      summary: Run the policy's tests against this version on synthetic fixtures; not mutating, no Idempotency-Key (cap policy:read).
+      responses:
+        '200':
+          description: Test results.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestRun'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /policies/{policy_id}/validate:
+    parameters:
+      - $ref: '#/components/parameters/PolicyId'
+    post:
+      tags: [policies]
+      operationId: validatePolicy
+      summary: Static-check policy YAML without saving; not mutating, no Idempotency-Key (cap policy:read).
+      requestBody:
+        $ref: '#/components/requestBodies/PolicyYaml'
+      responses:
+        '200':
+          description: Validation result (200 even when invalid).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationResult'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /policies/{policy_id}/retire:
+    parameters:
+      - $ref: '#/components/parameters/PolicyId'
+    post:
+      tags: [policies]
+      operationId: retirePolicy
+      summary: Retire the active version and archive the policy (cap policy:admin).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Policy retired.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /policies/{policy_id}/tests:
+    parameters:
+      - $ref: '#/components/parameters/PolicyId'
+    post:
+      tags: [policies]
+      operationId: createPolicyTest
+      summary: Add a policy test with a synthetic fixture and expectation (cap policy:write).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePolicyTest'
+      responses:
+        '201':
+          description: Test created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyTest'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [policies]
+      operationId: listPolicyTests
+      summary: List a policy's tests (cap policy:write).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of tests.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyTestPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /policies/{policy_id}/tests/{test_id}:
+    parameters:
+      - $ref: '#/components/parameters/PolicyId'
+      - name: test_id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/Id'
+    delete:
+      tags: [policies]
+      operationId: deletePolicyTest
+      summary: Delete a policy test; idempotent (cap policy:write).
+      responses:
+        '204':
+          description: Deleted.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ---------------------------------------------------------------- impact queries
+  /impact-queries/{impact_query_id}:
+    parameters:
+      - name: impact_query_id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/Id'
+    get:
+      tags: [impact-queries]
+      operationId: getImpactQuery
+      summary: Get an impact query (cap policy:read).
+      responses:
+        '200':
+          description: The impact query.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImpactQuery'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    patch:
+      tags: [impact-queries]
+      operationId: patchImpactQuery
+      summary: Update an impact query; re-runs the static check (cap target:admin).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImpactQueryPatch'
+      responses:
+        '200':
+          description: Updated impact query.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImpactQuery'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/PolicyInvalid' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      tags: [impact-queries]
+      operationId: deleteImpactQuery
+      summary: Delete an impact query; idempotent (cap target:admin).
+      responses:
+        '204':
+          description: Deleted.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ---------------------------------------------------------------- principals and keys
+  /principals:
+    post:
+      tags: [principals]
+      operationId: createPrincipal
+      summary: Create a principal (cap org_admin).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePrincipal'
+      responses:
+        '201':
+          description: Principal created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Principal'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [principals]
+      operationId: listPrincipals
+      summary: List principals in the org (cap org_admin).
+      parameters:
+        - name: kind
+          in: query
+          schema:
+            $ref: '#/components/schemas/PrincipalKind'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of principals.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrincipalPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /principals/{principal_id}:
+    parameters:
+      - $ref: '#/components/parameters/PrincipalId'
+    get:
+      tags: [principals]
+      operationId: getPrincipal
+      summary: Get a principal (cap org_admin).
+      responses:
+        '200':
+          description: The principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Principal'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    patch:
+      tags: [principals]
+      operationId: patchPrincipal
+      summary: Update name, org_admin or disabled state (cap org_admin).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrincipalPatch'
+      responses:
+        '200':
+          description: Updated principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Principal'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /principals/{principal_id}/api-keys:
+    parameters:
+      - $ref: '#/components/parameters/PrincipalId'
+    post:
+      tags: [principals]
+      operationId: createApiKey
+      summary: Issue an API key for a principal; the secret is returned once (cap org_admin).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKey'
+      responses:
+        '201':
+          description: Key issued with its one-time secret.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyWithSecret'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [principals]
+      operationId: listApiKeys
+      summary: List a principal's API keys, without secrets (cap org_admin).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of keys.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api-keys/{api_key_id}:
+    parameters:
+      - name: api_key_id
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/Id'
+    delete:
+      tags: [principals]
+      operationId: revokeApiKey
+      summary: Revoke a key; data planes learn via RoutingUpsert; idempotent (cap org_admin).
+      responses:
+        '204':
+          description: Revoked.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ---------------------------------------------------------------- audit
+  /audit-events:
+    get:
+      tags: [audit]
+      operationId: listAuditEvents
+      summary: Domain events straight from the events table; payloads never contain row data (cap audit:read).
+      parameters:
+        - name: target_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/Id'
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/EventType'
+        - name: aggregate_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/Id'
+        - name: since
+          in: query
+          schema:
+            $ref: '#/components/schemas/Timestamp'
+        - name: until
+          in: query
+          schema:
+            $ref: '#/components/schemas/Timestamp'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of events.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventPage'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ---------------------------------------------------------------- webhooks
+  /webhooks:
+    post:
+      tags: [webhooks]
+      operationId: createWebhook
+      summary: Register an HTTPS webhook for a set of event types (cap webhook:admin).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhook'
+      responses:
+        '201':
+          description: Webhook registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [webhooks]
+      operationId: listWebhooks
+      summary: List webhooks (cap webhook:admin).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of webhooks.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /webhooks/{webhook_id}:
+    parameters:
+      - $ref: '#/components/parameters/WebhookId'
+    delete:
+      tags: [webhooks]
+      operationId: deleteWebhook
+      summary: Delete a webhook; idempotent (cap webhook:admin).
+      responses:
+        '204':
+          description: Deleted.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /webhooks/{webhook_id}/deliveries:
+    parameters:
+      - $ref: '#/components/parameters/WebhookId'
+    get:
+      tags: [webhooks]
+      operationId: listWebhookDeliveries
+      summary: Delivery attempts of a webhook, newest first; 7-day retention (cap webhook:admin).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of deliveries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDeliveryPage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ---------------------------------------------------------------- data planes
+  /data-planes:
+    post:
+      tags: [data-planes]
+      operationId: createDataPlane
+      summary: Create a data-plane identity and a one-time, 1 h enrolment token (cap target_admin).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDataPlane'
+      responses:
+        '201':
+          description: Identity created; the enrolment token is shown once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataPlaneEnrolment'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [data-planes]
+      operationId: listDataPlanes
+      summary: List data planes (cap target_admin).
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Page of data planes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataPlanePage'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /data-planes/{data_plane_id}:
+    parameters:
+      - $ref: '#/components/parameters/DataPlaneId'
+    get:
+      tags: [data-planes]
+      operationId: getDataPlane
+      summary: Get a data plane (cap target_admin).
+      responses:
+        '200':
+          description: The data plane.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataPlane'
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /data-planes/{data_plane_id}/enrolment-token:
+    parameters:
+      - $ref: '#/components/parameters/DataPlaneId'
+    post:
+      tags: [data-planes]
+      operationId: rotateEnrolmentToken
+      summary: Replace a used or expired enrolment token; revokes any certificate issued under the previous one (cap target_admin).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: New token, shown once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataPlaneEnrolment'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+# ====================================================================== components
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: stw_<prefix>_<secret>
+      description: Agent or service API key (doc 10 §3.1); scopes are resource:verb capabilities.
+    humanToken:
+      type: http
+      scheme: bearer
+      bearerFormat: stwt_<token>
+      description: Short-lived (1 h) human token from POST /v1/auth/tokens carrying the human's memberships.
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: _steward_session
+      description: Phoenix session established by SSO (OIDC); accepted only by POST /v1/auth/tokens.
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Required on every mutating POST; stored per (principal, key) for 24 h; same key with a different payload → 409 idempotency_conflict.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    Limit:
+      name: limit
+      in: query
+      description: Page size (default 50, max 200).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor from a previous response's next_cursor.
+      schema:
+        type: string
+        maxLength: 512
+    TargetId:
+      name: target_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    BranchId:
+      name: branch_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    ChangesetId:
+      name: changeset_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    MergeId:
+      name: merge_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    PolicyId:
+      name: policy_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    PolicyVersionNumber:
+      name: version
+      in: path
+      required: true
+      description: Policy version number (1-based).
+      schema:
+        type: integer
+        minimum: 1
+    PrincipalId:
+      name: principal_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    WebhookId:
+      name: webhook_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+    DataPlaneId:
+      name: data_plane_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+
+  headers:
+    X-Request-Id:
+      description: Echoed or generated request id; the trace id propagated to data-plane calls.
+      schema:
+        type: string
+    Idempotent-Replayed:
+      description: Present and true when the response was served from the idempotency store.
+      schema:
+        type: boolean
+    RateLimit-Limit:
+      description: Requests allowed in the current window.
+      schema:
+        type: integer
+    RateLimit-Remaining:
+      description: Requests remaining in the current window.
+      schema:
+        type: integer
+    RateLimit-Reset:
+      description: Seconds until the window resets.
+      schema:
+        type: integer
+    Retry-After:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+    Deprecation:
+      description: Present when the endpoint is deprecated; removal follows 12 months later.
+      schema:
+        type: string
+
+  requestBodies:
+    CreateTarget:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CreateTarget'
+    PolicyYaml:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PolicyYaml'
+
+  responses:
+    Proposed:
+      description: Changeset computation started; poll GET /v1/changesets/{id} until status leaves `computing`.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Idempotent-Replayed:
+          $ref: '#/components/headers/Idempotent-Replayed'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProposeResponse'
+    InvalidRequest:
+      description: Schema violation, missing Idempotency-Key, or bad cursor.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unauthenticated:
+      description: Missing, unknown or revoked key/token.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Forbidden:
+      description: Capability missing (`forbidden`) or self-approval (`self_approval`); never cached.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: Resource absent or outside the caller's org; the two are never distinguished.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Conflict:
+      description: One of the 409 codes (idempotency_conflict, stale_transition, changeset_superseded, already_reviewed, merge_in_progress, verdict_block, compensation_unavailable, policy_activation_refused).
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    PolicyInvalid:
+      description: Static check failed; `details.errors[].code` ∈ unknown_relation, unknown_column, bad_shape, or a parse error.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    RateLimited:
+      description: Token bucket exhausted; retry after `Retry-After` seconds.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    ReviewEditNotSupported:
+      description: decision `edited` is not in M0.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unavailable:
+      description: Metadata Postgres unreachable (`unavailable`) or the data plane did not answer before checkpoint (`data_plane_unreachable`).
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+
+  schemas:
+    # ---------------------------------------------------------------- primitives
+    Id:
+      type: string
+      format: uuid
+      description: UUIDv7, lower-case text.
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    Timestamp:
+      type: string
+      format: date-time
+      description: RFC 3339 with Z, microsecond precision.
+    NextCursor:
+      type: [string, 'null']
+      description: Opaque cursor for the next page; null at the end.
+    Rationale:
+      type: object
+      additionalProperties: false
+      properties:
+        rationale:
+          type: string
+          maxLength: 4096
+          description: Free-text rationale (≤ 4 KB), recorded as evidence.
+
+    # ---------------------------------------------------------------- enums
+    ErrorCode:
+      type: string
+      description: Closed set (doc 10 §2.1).
+      enum:
+        - invalid_request
+        - unauthenticated
+        - forbidden
+        - self_approval
+        - not_found
+        - idempotency_conflict
+        - stale_transition
+        - changeset_superseded
+        - already_reviewed
+        - merge_in_progress
+        - verdict_block
+        - compensation_unavailable
+        - policy_activation_refused
+        - policy_invalid
+        - rate_limited
+        - review_edit_not_supported
+        - unavailable
+        - data_plane_unreachable
+    LifecycleReason:
+      type: string
+      description: Reason recorded on terminal or returning transitions (doc 12 §3; contracts/reasons.yaml).
+      enum:
+        - snapshot_lost
+        - overlay_lost
+        - stale_base
+        - ttl_expired
+        - reject_with_retry
+        - compute_failed
+        - data_plane_unreachable
+        - compensation_failed
+        - adapter_unavailable
+        - withdrawn
+        - reevaluated
+        - new_changeset
+        - verdict_block
+        - review_rejected
+        - review_approved
+        - verdict_auto_merge
+        - abandoned_by_principal
+        - merge_applied
+        - retention_elapsed
+    BranchState:
+      type: string
+      enum: [open, proposed, merging, merged, rejected, abandoned, closed]
+    ChangesetStatus:
+      type: string
+      enum: [computing, evaluated, superseded]
+    VerdictOutcome:
+      type: string
+      enum: [auto-merge, hold, block]
+    VerdictReason:
+      type: string
+      enum: [policies, policy_error, no_policy_coverage, revert_conflict]
+    AssertionStatus:
+      type: string
+      enum: [passed, failed, error]
+    AssertionOutcome:
+      type: string
+      enum: [hold, block]
+    ReviewDecision:
+      type: string
+      enum: [approved, rejected, edited]
+    MergeStatus:
+      type: string
+      enum: [pending, applied, compensated, failed]
+    CompensationStatus:
+      type: string
+      enum: [complete, partial, consumed, expired, corrupt]
+    Reversible:
+      type: string
+      enum: [complete, partial]
+    SnapshotFidelity:
+      type: string
+      enum: [TRUE_SNAPSHOT, TIMESTAMP_BOUNDED]
+    TargetKind:
+      type: string
+      description: Adapter kind; M0 ships postgres only (doc 12 §2.1 lists the full set).
+      enum: [postgres, mysql, iceberg, snowflake, bigquery, salesforce, hubspot]
+    TargetStatus:
+      type: string
+      enum: [registering, ready, failed]
+    PrincipalKind:
+      type: string
+      enum: [agent, human, service]
+    MembershipCapability:
+      type: string
+      description: Human membership capability on a target (doc 07 §8).
+      enum: [reviewer, policy_admin, target_admin]
+    ApiKeyCapability:
+      type: string
+      description: API-key scope (doc 10 §3.1); agents never hold review:decide, policy:write, policy:admin or merge:revert in M0.
+      enum:
+        - branch:write
+        - branch:propose
+        - changeset:read
+        - review:read
+        - review:decide
+        - policy:read
+        - policy:write
+        - policy:admin
+        - target:admin
+        - merge:revert
+        - audit:read
+        - webhook:admin
+    PolicyVersionState:
+      type: string
+      enum: [draft, active, retired]
+    EventType:
+      type: string
+      description: Domain event types (doc 12 §6.1, doc 10 §6; contracts/reasons.yaml `events`).
+      enum:
+        - branch.created
+        - branch.proposed
+        - branch.withdrawn
+        - branch.merging
+        - branch.merged
+        - branch.rejected
+        - branch.abandoned
+        - branch.closed
+        - branch.returned_to_open
+        - branch.heartbeat_lost
+        - changeset.computing
+        - changeset.evaluated
+        - changeset.superseded
+        - review.recorded
+        - merge.started
+        - merge.checkpointed
+        - merge.applied
+        - merge.failed
+        - merge.stalled
+        - merge.compensated
+        - target.lease_expired
+        - target.lease_released
+        - target.health_changed
+        - heartbeat.anomaly
+        - grant.issued
+        - policy.version_saved
+        - policy.activated
+        - policy.retired
+        - webhook.suspended
+    AggregateType:
+      type: string
+      enum: [branch, changeset, review, merge, policy, target, heartbeat]
+    WebhookStatus:
+      type: string
+      enum: [active, suspended]
+    DeliveryStatus:
+      type: string
+      enum: [pending, delivered, failed, dead]
+    GrantScope:
+      type: string
+      description: row_delta:read, compensation:read, or compensation:export:<target_id>.
+      pattern: '^(row_delta:read|compensation:read|compensation:export:[0-9a-f-]{36})$'
+
+    # ---------------------------------------------------------------- error envelope
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          $ref: '#/components/schemas/Error'
+    Error:
+      type: object
+      required: [code, message, details, request_id]
+      additionalProperties: false
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          description: Human-readable; never contains row values, SQL with literals, or secrets.
+        details:
+          type: object
+          description: Code-specific details, e.g. `reason` for compensation_unavailable / policy_activation_refused, `errors[]` for policy_invalid.
+          additionalProperties: true
+        request_id:
+          type: string
+
+    # ---------------------------------------------------------------- auth
+    HumanToken:
+      type: object
+      required: [token, expires_at]
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          description: stwt_... bearer token, 1 h, not renewable.
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    # ---------------------------------------------------------------- targets
+    Target:
+      type: object
+      required: [id, org_id, name, kind, status, adapter, settings, created_at, merging_merge_id, lease_expires_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        org_id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+          maxLength: 256
+        kind:
+          $ref: '#/components/schemas/TargetKind'
+        status:
+          $ref: '#/components/schemas/TargetStatus'
+        adapter:
+          $ref: '#/components/schemas/TargetAdapter'
+        settings:
+          $ref: '#/components/schemas/TargetSettings'
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        merging_merge_id:
+          oneOf:
+            - $ref: '#/components/schemas/Id'
+            - type: 'null'
+          description: Merge currently holding the per-target lease (read-only, doc 13 §7).
+        lease_expires_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+          description: Read-only; null when no merge is in flight.
+    TargetAdapter:
+      type: object
+      required: [credential_ref, data_plane_id]
+      additionalProperties: false
+      properties:
+        credential_ref:
+          type: string
+          description: k8s://, aws-sm:// or vault:// reference resolved by the data plane (doc 08 §5.5).
+          pattern: '^(k8s|aws-sm|vault)://'
+        data_plane_id:
+          $ref: '#/components/schemas/Id'
+    TargetSettings:
+      type: object
+      required: [branch_ttl_s, held_ttl_s, uncovered_changeset_verdict, overlay_retention_days, compensation_retention_days, assertion_budget_s, summary_values_allowed, legal_hold]
+      additionalProperties: false
+      properties:
+        branch_ttl_s:
+          type: integer
+          minimum: 60
+          default: 86400
+        held_ttl_s:
+          type: [integer, 'null']
+          minimum: 60
+          default: null
+          description: TTL for a held changeset; null means none (doc 13 §12).
+        uncovered_changeset_verdict:
+          type: string
+          enum: [hold, auto-merge]
+          default: hold
+        overlay_retention_days:
+          type: integer
+          minimum: 1
+          default: 7
+        compensation_retention_days:
+          type: integer
+          minimum: 1
+          default: 90
+          description: Must be ≥ the revert window (doc 13 §9).
+        assertion_budget_s:
+          type: integer
+          minimum: 1
+          default: 60
+        summary_values_allowed:
+          type: array
+          default: []
+          items:
+            $ref: '#/components/schemas/SummaryValuesAllowed'
+        legal_hold:
+          type: boolean
+          default: false
+          description: Per-target legal hold on all compensation records (doc 09 §5.5).
+    SummaryValuesAllowed:
+      type: object
+      required: [table, columns]
+      additionalProperties: false
+      properties:
+        table:
+          type: string
+          maxLength: 256
+        columns:
+          type: array
+          items:
+            type: string
+            maxLength: 256
+    TargetSettingsPatch:
+      type: object
+      description: Any subset of TargetSettings.
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        branch_ttl_s:
+          type: integer
+          minimum: 60
+        held_ttl_s:
+          type: [integer, 'null']
+          minimum: 60
+        uncovered_changeset_verdict:
+          type: string
+          enum: [hold, auto-merge]
+        overlay_retention_days:
+          type: integer
+          minimum: 1
+        compensation_retention_days:
+          type: integer
+          minimum: 1
+        assertion_budget_s:
+          type: integer
+          minimum: 1
+        summary_values_allowed:
+          type: array
+          items:
+            $ref: '#/components/schemas/SummaryValuesAllowed'
+        legal_hold:
+          type: boolean
+    CreateTarget:
+      type: object
+      required: [name, kind, adapter]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          maxLength: 256
+        kind:
+          $ref: '#/components/schemas/TargetKind'
+        adapter:
+          $ref: '#/components/schemas/TargetAdapter'
+        settings:
+          $ref: '#/components/schemas/TargetSettingsPatch'
+    TargetDescription:
+      type: object
+      description: Adapter describe() output (doc 08 §3.1); schema metadata, never rows.
+      required: [target_id, fidelity, tables, reversible_tables, described_at]
+      additionalProperties: false
+      properties:
+        target_id:
+          $ref: '#/components/schemas/Id'
+        fidelity:
+          $ref: '#/components/schemas/SnapshotFidelity'
+        tables:
+          type: array
+          items:
+            $ref: '#/components/schemas/TableDescription'
+        reversible_tables:
+          type: array
+          items:
+            type: string
+        described_at:
+          $ref: '#/components/schemas/Timestamp'
+    TableDescription:
+      type: object
+      required: [name, columns, primary_key, has_last_modified_marker, before_images_cheap]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/ColumnDescription'
+        primary_key:
+          type: array
+          description: Column names of the primary key (or Salesforce Id).
+          items:
+            type: string
+        has_last_modified_marker:
+          type: boolean
+        before_images_cheap:
+          type: boolean
+    ColumnDescription:
+      type: object
+      required: [name, type]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          description: Nominal type as the target reports it.
+        nullable:
+          type: boolean
+    TargetPage:
+      type: object
+      required: [targets, next_cursor]
+      additionalProperties: false
+      properties:
+        targets:
+          type: array
+          items:
+            $ref: '#/components/schemas/Target'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+    # ---------------------------------------------------------------- queue
+    QueueEntry:
+      type: object
+      description: Review queue read model (doc 12 §2.3 queue_entries).
+      required: [id, target_id, changeset_id, branch_id, principal_id, hold_reasons, entered_at, priority]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        target_id:
+          $ref: '#/components/schemas/Id'
+        changeset_id:
+          $ref: '#/components/schemas/Id'
+        branch_id:
+          $ref: '#/components/schemas/Id'
+        principal_id:
+          $ref: '#/components/schemas/Id'
+        hold_reasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/HoldReason'
+        entered_at:
+          $ref: '#/components/schemas/Timestamp'
+        priority:
+          type: integer
+          default: 0
+    HoldReason:
+      type: object
+      description: Either a fired assertion ({policy_id, assertion_id, count}) or a verdict reason ({reason}).
+      additionalProperties: false
+      properties:
+        policy_id:
+          $ref: '#/components/schemas/Id'
+        assertion_id:
+          type: string
+        count:
+          type: integer
+          minimum: 0
+        reason:
+          $ref: '#/components/schemas/VerdictReason'
+    QueueEntryPage:
+      type: object
+      required: [queue_entries, next_cursor]
+      additionalProperties: false
+      properties:
+        queue_entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/QueueEntry'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+    # ---------------------------------------------------------------- branches
+    Branch:
+      type: object
+      required: [id, target_id, principal_id, state, reason, revert_of, base_snapshot, current_changeset_id, merge_wait, heartbeat_lost, expires_at, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        target_id:
+          $ref: '#/components/schemas/Id'
+        principal_id:
+          $ref: '#/components/schemas/Id'
+        state:
+          $ref: '#/components/schemas/BranchState'
+        reason:
+          oneOf:
+            - $ref: '#/components/schemas/LifecycleReason'
+            - type: 'null'
+          description: Set on terminal states (doc 13 invariant 16).
+        revert_of:
+          oneOf:
+            - $ref: '#/components/schemas/Id'
+            - type: 'null'
+          description: Merge id this branch reverts, if a revert branch.
+        base_snapshot:
+          $ref: '#/components/schemas/BaseSnapshot'
+        current_changeset_id:
+          oneOf:
+            - $ref: '#/components/schemas/Id'
+            - type: 'null'
+        merge_wait:
+          type: boolean
+          description: True while waiting for the per-target merge lease.
+        heartbeat_lost:
+          type: boolean
+          description: Flag, not a state (doc 07 §5.3).
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        updated_at:
+          $ref: '#/components/schemas/Timestamp'
+    BaseSnapshot:
+      type: object
+      required: [ref, fidelity, opened_at]
+      additionalProperties: false
+      properties:
+        ref:
+          type: string
+        fidelity:
+          $ref: '#/components/schemas/SnapshotFidelity'
+        opened_at:
+          $ref: '#/components/schemas/Timestamp'
+    CreateBranch:
+      type: object
+      required: [target_id]
+      additionalProperties: false
+      properties:
+        target_id:
+          $ref: '#/components/schemas/Id'
+        rationale:
+          type: string
+          maxLength: 4096
+        copy_overlay_from:
+          $ref: '#/components/schemas/Id'
+    CreateBranchResponse:
+      allOf:
+        - $ref: '#/components/schemas/Branch'
+        - type: object
+          required: [connection_string]
+          properties:
+            connection_string:
+              type: string
+              description: postgresql://<principal_id>:<api_key>@<proxy>:5432/<branch_id>?sslmode=require
+    ProposeResponse:
+      type: object
+      required: [changeset_id, state]
+      additionalProperties: false
+      properties:
+        changeset_id:
+          $ref: '#/components/schemas/Id'
+        state:
+          type: string
+          const: computing
+    BranchPage:
+      type: object
+      required: [branches, next_cursor]
+      additionalProperties: false
+      properties:
+        branches:
+          type: array
+          items:
+            $ref: '#/components/schemas/Branch'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+    # ---------------------------------------------------------------- changesets
+    Changeset:
+      type: object
+      required: [id, branch_id, status, superseded_by, superseded_reason, summary, impact, evidence, row_delta_digest, reversible, conflicts_count, touches_revertable_merges, verdict, proposed_at, evaluated_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        branch_id:
+          $ref: '#/components/schemas/Id'
+        status:
+          $ref: '#/components/schemas/ChangesetStatus'
+        superseded_by:
+          oneOf:
+            - $ref: '#/components/schemas/Id'
+            - type: 'null'
+        superseded_reason:
+          oneOf:
+            - $ref: '#/components/schemas/LifecycleReason'
+            - type: 'null'
+        summary:
+          oneOf:
+            - $ref: '#/components/schemas/Summary'
+            - type: 'null'
+        impact:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/ImpactMetric'
+        evidence:
+          $ref: '#/components/schemas/Evidence'
+        row_delta_digest:
+          type: [string, 'null']
+          description: Hex SHA-256 of the row delta.
+        reversible:
+          oneOf:
+            - $ref: '#/components/schemas/Reversible'
+            - type: 'null'
+        conflicts_count:
+          type: integer
+          minimum: 0
+        touches_revertable_merges:
+          type: array
+          items:
+            $ref: '#/components/schemas/Id'
+        verdict:
+          oneOf:
+            - $ref: '#/components/schemas/Verdict'
+            - type: 'null'
+        review:
+          $ref: '#/components/schemas/ReviewNote'
+        proposed_at:
+          $ref: '#/components/schemas/Timestamp'
+        evaluated_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+    ReviewNote:
+      type: object
+      description: Reviewer note surfaced to the principal after reject-with-retry (doc 13 §5).
+      additionalProperties: false
+      properties:
+        note:
+          type: string
+          maxLength: 4096
+    Evidence:
+      type: object
+      required: [query_count, tables_read, evidence_gap, rationale, refs]
+      additionalProperties: false
+      properties:
+        query_count:
+          type: integer
+          minimum: 0
+        tables_read:
+          type: array
+          items:
+            type: string
+        evidence_gap:
+          type: integer
+          minimum: 0
+        rationale:
+          type: [string, 'null']
+        refs:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvidenceRef'
+    EvidenceRef:
+      type: object
+      required: [path, digest]
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+        digest:
+          type: string
+          description: Hex SHA-256.
+    Summary:
+      type: object
+      description: JSON projection of steward.plane.v1.Summary; schema steward:changeset-summary/1 (doc 12 §5.1).
+      required: [format_version, tables, columns, truncated, reversible, conflicts_count, partial_keys_count]
+      additionalProperties: false
+      properties:
+        format_version:
+          type: integer
+          const: 1
+        truncated:
+          type: boolean
+        reversible:
+          $ref: '#/components/schemas/Reversible'
+        conflicts_count:
+          type: integer
+          minimum: 0
+        conflicts_ref:
+          type: string
+          maxLength: 256
+        partial_keys_count:
+          type: integer
+          minimum: 0
+        staleness_check:
+          type: string
+          enum: [values, values_only, timestamp_and_values]
+        touches_revertable_merges:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/Id'
+        tables:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/TableSummary'
+        columns:
+          type: array
+          maxItems: 5000
+          items:
+            $ref: '#/components/schemas/ColumnSummary'
+    TableSummary:
+      type: object
+      required: [table_name, inserts, updates, deletes, noop_updates, invalid_before_images]
+      additionalProperties: false
+      properties:
+        table_name:
+          type: string
+          maxLength: 256
+        inserts:
+          type: integer
+          minimum: 0
+        updates:
+          type: integer
+          minimum: 0
+        deletes:
+          type: integer
+          minimum: 0
+        noop_updates:
+          type: integer
+          minimum: 0
+        invalid_before_images:
+          type: integer
+          minimum: 0
+    ColumnSummary:
+      type: object
+      required: [table_name, column_name, changed_count]
+      additionalProperties: false
+      properties:
+        table_name:
+          type: string
+          maxLength: 256
+        column_name:
+          type: string
+          maxLength: 256
+        changed_count:
+          type: integer
+          minimum: 0
+        null_delta:
+          type: integer
+        numeric_delta_min:
+          type: [number, 'null']
+        numeric_delta_max:
+          type: [number, 'null']
+        numeric_delta_median:
+          type: [number, 'null']
+        numeric_pct_median:
+          type: [number, 'null']
+        distinct_before:
+          type: integer
+          minimum: 0
+        distinct_after:
+          type: integer
+          minimum: 0
+        distinct_values:
+          type: array
+          maxItems: 50
+          description: Only for columns in summary_values_allowed, and only returned to callers with review:read.
+          items:
+            $ref: '#/components/schemas/DistinctValue'
+    DistinctValue:
+      type: object
+      required: [value, count_before, count_after]
+      additionalProperties: false
+      properties:
+        value:
+          type: [string, number, boolean, 'null']
+          maxLength: 256
+        count_before:
+          type: integer
+        count_after:
+          type: integer
+    ImpactMetric:
+      type: object
+      description: One metric of steward:changeset-impact/1 (doc 12 §5.2).
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          pattern: '^[a-z0-9_-]+\.[a-z0-9_]+$'
+          maxLength: 128
+        value:
+          type: [number, boolean, 'null']
+        error:
+          type: [string, 'null']
+          maxLength: 512
+    Verdict:
+      type: object
+      required: [id, outcome, reason, policy_version_ids, evaluated_at, assertions]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        outcome:
+          $ref: '#/components/schemas/VerdictOutcome'
+        reason:
+          $ref: '#/components/schemas/VerdictReason'
+        policy_version_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/Id'
+        evaluated_at:
+          $ref: '#/components/schemas/Timestamp'
+        assertions:
+          type: array
+          description: Fired assertions first.
+          items:
+            $ref: '#/components/schemas/AssertionResult'
+    AssertionResult:
+      type: object
+      required: [policy_id, policy_version, assertion_id, outcome, status, count, count_capped, sample_ref, duration_ms]
+      additionalProperties: false
+      properties:
+        policy_id:
+          $ref: '#/components/schemas/Id'
+        policy_version:
+          type: integer
+          minimum: 1
+        assertion_id:
+          type: string
+        outcome:
+          $ref: '#/components/schemas/AssertionOutcome'
+        status:
+          $ref: '#/components/schemas/AssertionStatus'
+        count:
+          type: integer
+          minimum: 0
+        count_capped:
+          type: boolean
+        denominator:
+          type: integer
+          minimum: 0
+        sample_ref:
+          type: [string, 'null']
+          description: Grant-served locator for sample keys; never the keys themselves.
+        error_code:
+          type: string
+        duration_ms:
+          type: integer
+          minimum: 0
+    ChangesetPage:
+      type: object
+      required: [changesets, next_cursor]
+      additionalProperties: false
+      properties:
+        changesets:
+          type: array
+          items:
+            $ref: '#/components/schemas/Changeset'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+    # ---------------------------------------------------------------- grants
+    CreateGrant:
+      type: object
+      additionalProperties: false
+      properties:
+        scope:
+          $ref: '#/components/schemas/GrantScope'
+    Grant:
+      type: object
+      required: [grant, data_plane_url, expires_at]
+      additionalProperties: false
+      properties:
+        grant:
+          type: string
+          description: ES256 JWT with claims iss, aud, sub, org, cs, scope, jti, exp (doc 07 §5.6).
+        data_plane_url:
+          type: string
+          format: uri
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    # ---------------------------------------------------------------- reviews
+    Review:
+      type: object
+      required: [id, changeset_id, principal_id, decision, allow_retry, decided_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        changeset_id:
+          $ref: '#/components/schemas/Id'
+        principal_id:
+          $ref: '#/components/schemas/Id'
+        decision:
+          $ref: '#/components/schemas/ReviewDecision'
+        allow_retry:
+          type: boolean
+        note:
+          type: string
+          maxLength: 4096
+        decided_at:
+          $ref: '#/components/schemas/Timestamp'
+    CreateReview:
+      type: object
+      required: [decision]
+      additionalProperties: false
+      properties:
+        decision:
+          $ref: '#/components/schemas/ReviewDecision'
+        allow_retry:
+          type: boolean
+          default: false
+          description: With `rejected`, returns the branch to open instead of rejecting it.
+        note:
+          type: string
+          maxLength: 4096
+    ReviewPage:
+      type: object
+      required: [reviews, next_cursor]
+      additionalProperties: false
+      properties:
+        reviews:
+          type: array
+          items:
+            $ref: '#/components/schemas/Review'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+    # ---------------------------------------------------------------- merges
+    Merge:
+      type: object
+      required: [id, changeset_id, branch_id, target_id, status, failure_reason, progress, compensation, reverted_by, started_at, applied_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        changeset_id:
+          $ref: '#/components/schemas/Id'
+        branch_id:
+          $ref: '#/components/schemas/Id'
+        target_id:
+          $ref: '#/components/schemas/Id'
+        status:
+          $ref: '#/components/schemas/MergeStatus'
+        failure_reason:
+          type: [string, 'null']
+          description: A lifecycle reason or an adapter code.
+        progress:
+          oneOf:
+            - $ref: '#/components/schemas/MergeProgress'
+            - type: 'null'
+        compensation:
+          oneOf:
+            - $ref: '#/components/schemas/Compensation'
+            - type: 'null'
+        reverted_by:
+          oneOf:
+            - $ref: '#/components/schemas/Id'
+            - type: 'null'
+          description: Revert branch id once compensated.
+        started_at:
+          $ref: '#/components/schemas/Timestamp'
+        applied_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+    MergeProgress:
+      type: object
+      description: Latest heartbeat merge_progress.
+      required: [rows_confirmed, rows_total]
+      additionalProperties: false
+      properties:
+        rows_confirmed:
+          type: integer
+          minimum: 0
+        rows_total:
+          type: integer
+          minimum: 0
+        retry_after:
+          $ref: '#/components/schemas/Timestamp'
+        last_error_code:
+          type: string
+    Compensation:
+      type: object
+      required: [status, retention_until, legal_hold, reserved_by_revert]
+      additionalProperties: false
+      properties:
+        status:
+          $ref: '#/components/schemas/CompensationStatus'
+        retention_until:
+          $ref: '#/components/schemas/Timestamp'
+        legal_hold:
+          type: boolean
+        reserved_by_revert:
+          oneOf:
+            - $ref: '#/components/schemas/Id'
+            - type: 'null'
+    CompensationPatch:
+      type: object
+      required: [legal_hold]
+      additionalProperties: false
+      properties:
+        legal_hold:
+          type: boolean
+    MergePage:
+      type: object
+      required: [merges, next_cursor]
+      additionalProperties: false
+      properties:
+        merges:
+          type: array
+          items:
+            $ref: '#/components/schemas/Merge'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+    # ---------------------------------------------------------------- policies
+    Policy:
+      type: object
+      required: [id, target_id, slug, active_version, archived_at, created_by]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        target_id:
+          $ref: '#/components/schemas/Id'
+        slug:
+          type: string
+        active_version:
+          type: [integer, 'null']
+          minimum: 1
+        archived_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        created_by:
+          $ref: '#/components/schemas/Id'
+    PolicyVersion:
+      type: object
+      required: [policy_id, version, state, yaml, scope, outcome, referenced_relations, tests_passed_at, saved_by, saved_at]
+      additionalProperties: false
+      properties:
+        policy_id:
+          $ref: '#/components/schemas/Id'
+        version:
+          type: integer
+          minimum: 1
+        state:
+          $ref: '#/components/schemas/PolicyVersionState'
+        yaml:
+          type: string
+        scope:
+          type: object
+          description: Parsed policy scope (doc 06 §4.2).
+          additionalProperties: true
+        outcome:
+          $ref: '#/components/schemas/AssertionOutcome'
+        referenced_relations:
+          type: array
+          items:
+            type: string
+        tests_passed_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        saved_by:
+          $ref: '#/components/schemas/Id'
+        saved_at:
+          $ref: '#/components/schemas/Timestamp'
+    PolicyWithVersion:
+      allOf:
+        - $ref: '#/components/schemas/Policy'
+        - type: object
+          required: [version]
+          properties:
+            version:
+              $ref: '#/components/schemas/PolicyVersion'
+    PolicyYaml:
+      type: object
+      required: [yaml]
+      additionalProperties: false
+      properties:
+        yaml:
+          type: string
+          maxLength: 1048576
+    ValidationResult:
+      type: object
+      required: [valid, errors, referenced_relations]
+      additionalProperties: false
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyError'
+        referenced_relations:
+          type: array
+          items:
+            type: string
+    PolicyError:
+      type: object
+      required: [code, message]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: unknown_relation, unknown_column, bad_shape, or a parse error code.
+        message:
+          type: string
+        path:
+          type: string
+          description: Location in the YAML document.
+    PolicyTest:
+      type: object
+      required: [id, policy_id, name, fixture, expect, last_run_version, last_result, last_run_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        policy_id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+        fixture:
+          $ref: '#/components/schemas/PolicyTestFixture'
+        expect:
+          $ref: '#/components/schemas/PolicyTestExpect'
+        last_run_version:
+          type: [integer, 'null']
+        last_result:
+          type: [string, 'null']
+          enum: [passed, failed, null]
+        last_run_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+    CreatePolicyTest:
+      type: object
+      required: [name, fixture, expect]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          maxLength: 256
+        fixture:
+          $ref: '#/components/schemas/PolicyTestFixture'
+        expect:
+          $ref: '#/components/schemas/PolicyTestExpect'
+    PolicyTestFixture:
+      type: object
+      description: Synthetic rows only (doc 18 §7); ≤ 1 MiB.
+      required: [tables]
+      additionalProperties: false
+      properties:
+        tables:
+          type: object
+          description: table name → rows (objects of column → value).
+          additionalProperties:
+            type: array
+            items:
+              type: object
+              additionalProperties: true
+        principal:
+          type: string
+          description: Policy-scope form, e.g. agent:pricing-bot.
+        proposed_at:
+          $ref: '#/components/schemas/Timestamp'
+    PolicyTestExpect:
+      type: object
+      required: [outcome]
+      additionalProperties: false
+      properties:
+        outcome:
+          $ref: '#/components/schemas/VerdictOutcome'
+        fired:
+          type: array
+          items:
+            type: string
+        counts:
+          type: object
+          additionalProperties:
+            type: integer
+    TestRun:
+      type: object
+      required: [version, results]
+      additionalProperties: false
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/TestResult'
+    TestResult:
+      type: object
+      required: [test_id, name, passed, actual]
+      additionalProperties: false
+      properties:
+        test_id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+        passed:
+          type: boolean
+        actual:
+          $ref: '#/components/schemas/TestActual'
+    TestActual:
+      type: object
+      required: [outcome, fired, counts]
+      additionalProperties: false
+      properties:
+        outcome:
+          $ref: '#/components/schemas/VerdictOutcome'
+        fired:
+          type: array
+          items:
+            type: string
+        counts:
+          type: object
+          additionalProperties:
+            type: integer
+    PolicyPage:
+      type: object
+      required: [policies, next_cursor]
+      additionalProperties: false
+      properties:
+        policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/Policy'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+    PolicyVersionPage:
+      type: object
+      required: [versions, next_cursor]
+      additionalProperties: false
+      properties:
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyVersion'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+    PolicyTestPage:
+      type: object
+      required: [tests, next_cursor]
+      additionalProperties: false
+      properties:
+        tests:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyTest'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+    # ---------------------------------------------------------------- impact queries
+    ImpactQuery:
+      type: object
+      required: [id, target_id, name, sql, timeout_s, created_by, created_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        target_id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+          pattern: '^[a-z0-9_-]+$'
+          maxLength: 64
+        sql:
+          type: string
+          description: A single SELECT (doc 05 §5.3).
+        timeout_s:
+          type: integer
+          minimum: 1
+          default: 30
+        created_by:
+          $ref: '#/components/schemas/Id'
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+    CreateImpactQuery:
+      type: object
+      required: [name, sql]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          pattern: '^[a-z0-9_-]+$'
+          maxLength: 64
+        sql:
+          type: string
+        timeout_s:
+          type: integer
+          minimum: 1
+          default: 30
+    ImpactQueryPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          pattern: '^[a-z0-9_-]+$'
+          maxLength: 64
+        sql:
+          type: string
+        timeout_s:
+          type: integer
+          minimum: 1
+    ImpactQueryPage:
+      type: object
+      required: [impact_queries, next_cursor]
+      additionalProperties: false
+      properties:
+        impact_queries:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImpactQuery'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+    # ---------------------------------------------------------------- principals and keys
+    Principal:
+      type: object
+      required: [id, org_id, kind, name, org_admin, created_at, disabled_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        org_id:
+          $ref: '#/components/schemas/Id'
+        kind:
+          $ref: '#/components/schemas/PrincipalKind'
+        name:
+          type: string
+          maxLength: 256
+        email:
+          type: string
+          format: email
+        org_admin:
+          type: boolean
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        disabled_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+    CreatePrincipal:
+      type: object
+      required: [kind, name]
+      additionalProperties: false
+      properties:
+        kind:
+          $ref: '#/components/schemas/PrincipalKind'
+        name:
+          type: string
+          maxLength: 256
+        email:
+          type: string
+          format: email
+        org_admin:
+          type: boolean
+          default: false
+    PrincipalPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          maxLength: 256
+        org_admin:
+          type: boolean
+        disabled:
+          type: boolean
+          description: True sets disabled_at; false clears it.
+    PrincipalPage:
+      type: object
+      required: [principals, next_cursor]
+      additionalProperties: false
+      properties:
+        principals:
+          type: array
+          items:
+            $ref: '#/components/schemas/Principal'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+    ApiKey:
+      type: object
+      required: [id, principal_id, prefix, targets, capabilities, expires_at, last_used_at, revoked_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        principal_id:
+          $ref: '#/components/schemas/Id'
+        prefix:
+          type: string
+          description: The <prefix> part of stw_<prefix>_<secret>.
+        targets:
+          type: array
+          items:
+            $ref: '#/components/schemas/Id'
+        capabilities:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiKeyCapability'
+        expires_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        last_used_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        revoked_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+    ApiKeyWithSecret:
+      allOf:
+        - $ref: '#/components/schemas/ApiKey'
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: Full stw_<prefix>_<secret> value; shown once and never stored.
+    CreateApiKey:
+      type: object
+      required: [targets, capabilities]
+      additionalProperties: false
+      properties:
+        targets:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Id'
+        capabilities:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ApiKeyCapability'
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+    ApiKeyPage:
+      type: object
+      required: [api_keys, next_cursor]
+      additionalProperties: false
+      properties:
+        api_keys:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiKey'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+    Membership:
+      type: object
+      required: [principal_id, capability]
+      additionalProperties: false
+      properties:
+        principal_id:
+          $ref: '#/components/schemas/Id'
+        capability:
+          $ref: '#/components/schemas/MembershipCapability'
+    MembershipRecord:
+      allOf:
+        - $ref: '#/components/schemas/Membership'
+        - type: object
+          required: [target_id, granted_by, created_at]
+          properties:
+            target_id:
+              $ref: '#/components/schemas/Id'
+            granted_by:
+              $ref: '#/components/schemas/Id'
+            created_at:
+              $ref: '#/components/schemas/Timestamp'
+    MembershipPage:
+      type: object
+      required: [memberships, next_cursor]
+      additionalProperties: false
+      properties:
+        memberships:
+          type: array
+          items:
+            $ref: '#/components/schemas/MembershipRecord'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+    # ---------------------------------------------------------------- audit events
+    Event:
+      type: object
+      description: One row of the events table (doc 12 §6); payload extends steward:event-envelope/1 and never carries row data.
+      required: [id, org_id, type, aggregate_type, aggregate_id, payload, occurred_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: Event id (bigserial, as a string).
+        org_id:
+          $ref: '#/components/schemas/Id'
+        type:
+          $ref: '#/components/schemas/EventType'
+        aggregate_type:
+          $ref: '#/components/schemas/AggregateType'
+        aggregate_id:
+          $ref: '#/components/schemas/Id'
+        payload:
+          $ref: '#/components/schemas/EventPayload'
+        occurred_at:
+          $ref: '#/components/schemas/Timestamp'
+    EventPayload:
+      type: object
+      description: steward:event-envelope/1 plus per-type fields (doc 12 §6.1); ≤ 8 KiB.
+      required: [schema_version, target_id, actor, reason]
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        target_id:
+          $ref: '#/components/schemas/Id'
+        actor:
+          type: string
+          pattern: '^((agent|human|service):[a-z0-9-]+|system:[A-Za-z.]+)$'
+        reason:
+          type: [string, 'null']
+          description: A lifecycle_reason or verdict_reason value, or null.
+      additionalProperties: true
+    EventPage:
+      type: object
+      required: [events, next_cursor]
+      additionalProperties: false
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+    # ---------------------------------------------------------------- webhooks
+    Webhook:
+      type: object
+      required: [id, url, event_types, status, created_by, created_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        target_id:
+          oneOf:
+            - $ref: '#/components/schemas/Id'
+            - type: 'null'
+          description: Null means org-wide.
+        url:
+          type: string
+          format: uri
+          pattern: '^https://'
+        event_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventType'
+        status:
+          $ref: '#/components/schemas/WebhookStatus'
+        created_by:
+          $ref: '#/components/schemas/Id'
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+    CreateWebhook:
+      type: object
+      required: [url, event_types]
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          format: uri
+          pattern: '^https://'
+        event_types:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/EventType'
+        secret:
+          type: string
+          minLength: 16
+          maxLength: 256
+          description: HMAC-SHA256 signing secret; generated when omitted and never returned.
+        target_id:
+          $ref: '#/components/schemas/Id'
+    WebhookDelivery:
+      type: object
+      required: [id, webhook_id, event_id, attempt, status, response_code, next_attempt_at, delivered_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        webhook_id:
+          $ref: '#/components/schemas/Id'
+        event_id:
+          type: string
+        attempt:
+          type: integer
+          minimum: 1
+        status:
+          $ref: '#/components/schemas/DeliveryStatus'
+        response_code:
+          type: [integer, 'null']
+        next_attempt_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        delivered_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+    WebhookPayload:
+      type: object
+      description: Body of one webhook delivery (doc 10 §6); signed with Steward-Signature.
+      required: [id, type, org_id, aggregate_type, aggregate_id, occurred_at, payload, api_version]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        type:
+          $ref: '#/components/schemas/EventType'
+        org_id:
+          $ref: '#/components/schemas/Id'
+        aggregate_type:
+          $ref: '#/components/schemas/AggregateType'
+        aggregate_id:
+          $ref: '#/components/schemas/Id'
+        occurred_at:
+          $ref: '#/components/schemas/Timestamp'
+        payload:
+          $ref: '#/components/schemas/EventPayload'
+        api_version:
+          type: string
+          const: v1
+    WebhookPage:
+      type: object
+      required: [webhooks, next_cursor]
+      additionalProperties: false
+      properties:
+        webhooks:
+          type: array
+          items:
+            $ref: '#/components/schemas/Webhook'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+    WebhookDeliveryPage:
+      type: object
+      required: [deliveries, next_cursor]
+      additionalProperties: false
+      properties:
+        deliveries:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookDelivery'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+    # ---------------------------------------------------------------- data planes
+    DataPlane:
+      type: object
+      required: [id, org_id, name, region, chart_version, cert_serial, enrolled_at, last_session_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        org_id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+          maxLength: 256
+        region:
+          type: string
+        chart_version:
+          type: [string, 'null']
+        cert_serial:
+          type: [string, 'null']
+        enrolled_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        last_session_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+    CreateDataPlane:
+      type: object
+      required: [name, region]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          maxLength: 256
+        region:
+          type: string
+    DataPlaneEnrolment:
+      type: object
+      required: [data_plane, enrolment_token, expires_at]
+      additionalProperties: false
+      properties:
+        data_plane:
+          $ref: '#/components/schemas/DataPlane'
+        enrolment_token:
+          type: string
+          description: stwe_... single-use token, 1 h, bound to org_id + data_plane_id; only its SHA-256 is stored.
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+    DataPlanePage:
+      type: object
+      required: [data_planes, next_cursor]
+      additionalProperties: false
+      properties:
+        data_planes:
+          type: array
+          items:
+            $ref: '#/components/schemas/DataPlane'
+        next_cursor:
+          $ref: '#/components/schemas/NextCursor'
+
+webhooks:
+  event:
+    post:
+      summary: One event per delivery; headers Steward-Event-Id, Steward-Event-Type, Steward-Signature, Steward-Delivery-Attempt.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookPayload'
+      responses:
+        '2XX':
+          description: Acknowledged; anything else or a 5 s timeout is retried (1 min … 24 h, then suspended).

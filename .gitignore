@@ -19,3 +19,13 @@ __pycache__/
 # Secrets
 .env
 *.pem
+# Build outputs (workspace skeletons)
+/target/
+adapters/.gradle/
+adapters/**/build/
+adapters/.kotlin/
+sdk/typescript/dist/
+sdk/mcp/dist/
+sdk/python/dist/
+*.egg-info/
+tools/fixtures/out/

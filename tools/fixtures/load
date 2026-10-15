@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# tools/fixtures/load — load generated fixtures into a target Postgres.
+#
+#   load [--size s|m|l|xl] [--seed N] [--dsn postgres://...]
+#
+# Defaults: size from STEWARD_FIXTURE_SIZE or `s`; seed 42; DSN built from
+# tools/stack/.env (target-db on localhost). Generates tools/fixtures/out/<size>
+# first if it is missing. Applies schema.sql idempotently, truncates the retail
+# tables, \copy's each CSV in FK order, ANALYZEs, and prints row counts.
+#
+# Needs `psql` on PATH (or inside the target-db container when run via
+# tools/stack, which falls back to `docker compose exec`).
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STACK_DIR="$HERE/../stack"
+
+if [[ -f "$STACK_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$STACK_DIR/.env"
+  set +a
+fi
+: "${TARGET_DB_PORT:=5434}" "${TARGET_DB_NAME:=retail}"
+: "${TARGET_DB_USER:=retail}" "${TARGET_DB_PASSWORD:=retail}"
+: "${STEWARD_ADAPTER_PASSWORD:=steward_adapter}"
+
+SIZE="${STEWARD_FIXTURE_SIZE:-s}"
+SEED=42
+DSN="postgres://${TARGET_DB_USER}:${TARGET_DB_PASSWORD}@localhost:${TARGET_DB_PORT}/${TARGET_DB_NAME}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --size) SIZE="$2"; shift 2 ;;
+    --size=*) SIZE="${1#*=}"; shift ;;
+    --seed) SEED="$2"; shift 2 ;;
+    --seed=*) SEED="${1#*=}"; shift ;;
+    --dsn) DSN="$2"; shift 2 ;;
+    --dsn=*) DSN="${1#*=}"; shift ;;
+    -h|--help) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "load: unknown argument '$1'" >&2; exit 2 ;;
+  esac
+done
+
+case "$SIZE" in s|m|l|xl) ;; *) echo "load: --size must be s|m|l|xl" >&2; exit 2 ;; esac
+
+OUT="$HERE/out/$SIZE"
+TABLES=(products prices inventory customers invoices ledger_entries)
+
+log() { echo "==> $*"; }
+
+if [[ ! -f "$OUT/MANIFEST" ]]; then
+  log "fixtures out/$SIZE missing; generating (seed $SEED)"
+  python3 "$HERE/generate.py" --size "$SIZE" --seed "$SEED" --quiet >/dev/null
+fi
+for t in "${TABLES[@]}"; do
+  [[ -f "$OUT/$t.csv" ]] || { echo "load: missing $OUT/$t.csv" >&2; exit 1; }
+done
+
+command -v psql >/dev/null 2>&1 || {
+  echo "load: psql not found on PATH; install postgresql-client or run via tools/stack" >&2
+  exit 1
+}
+
+PSQL=(psql "$DSN" -v ON_ERROR_STOP=1 -q -X)
+
+log "applying schema.sql (idempotent)"
+"${PSQL[@]}" -v adapter_password="$STEWARD_ADAPTER_PASSWORD" -f "$HERE/schema.sql"
+
+log "truncating retail tables"
+"${PSQL[@]}" -c "TRUNCATE products, prices, inventory, customers, invoices, ledger_entries RESTART IDENTITY CASCADE"
+
+log "loading size $SIZE from $OUT"
+# One psql session, FK order, CSV parsing via \copy. The column list comes from
+# each CSV's header so `last_modified` (filled by the DB) is left out.
+{
+  for t in "${TABLES[@]}"; do
+    cols="$(head -n1 "$OUT/$t.csv" | tr -d '\r')"
+    echo "\\copy $t ($cols) FROM '$OUT/$t.csv' WITH (FORMAT csv, HEADER true)"
+  done
+  echo "ANALYZE;"
+} | "${PSQL[@]}"
+
+log "row counts"
+"${PSQL[@]}" -P footer=off <<'SQL'
+SELECT 'products'       AS "table", count(*) AS rows FROM products
+UNION ALL SELECT 'prices',         count(*) FROM prices
+UNION ALL SELECT 'inventory',      count(*) FROM inventory
+UNION ALL SELECT 'customers',      count(*) FROM customers
+UNION ALL SELECT 'invoices',       count(*) FROM invoices
+UNION ALL SELECT 'ledger_entries', count(*) FROM ledger_entries;
+SQL
+
+"${PSQL[@]}" -At -c "SELECT format('underpriced: %s of %s prices rows (%s %%)', c, n, round(100.0*c/n, 2)) FROM (SELECT count(*) FILTER (WHERE pr.price < p.cost) c, count(*) n FROM prices pr JOIN products p USING (sku)) s"
