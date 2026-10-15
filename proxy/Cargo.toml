@@ -1,0 +1,37 @@
+[package]
+name = "steward-proxy"
+description = "Write proxy: Postgres wire protocol front end, statement classification and routing (doc 04)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "steward-proxy"
+path = "src/main.rs"
+
+[dependencies]
+steward-overlay.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+prost.workspace = true
+tonic.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "classify"
+harness = false
+
+[lints]
+workspace = true

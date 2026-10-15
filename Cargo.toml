@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = [
+    "proxy",
+    "engine/steward-engine",
+    "engine/steward-overlay",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+repository = "https://github.com/steward/steward"
+
+# Pinned minor versions; doc 18 §5 says adding any dependency to `proxy/` needs
+# a question first, so this list is the agreed baseline.
+[workspace.dependencies]
+steward-overlay = { path = "engine/steward-overlay" }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs"] }
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bytes = "1.12"
+prost = "0.14"
+tonic = "0.14"
+criterion = { version = "0.8", default-features = false }
+
+# doc 18 §2 (Rust): `cargo clippy -- -D warnings` must pass; CI passes `-D warnings`
+# on the command line. `unsafe_code` is denied workspace-wide; a module named
+# `ffi` may re-allow it with `#![allow(unsafe_code)]` and a safety comment on
+# every block.
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Product names (DuckDB, SQLite, MySQL) in prose trip this lint constantly.
+doc_markdown = "allow"

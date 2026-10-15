@@ -1,0 +1,29 @@
+{
+  "name": "@steward/sdk",
+  "version": "0.1.0",
+  "description": "Steward agent SDK for TypeScript (doc 11)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "echo \"build: not wired yet (doc 11 §11)\" && exit 0",
+    "test": "echo \"test: not wired yet (doc 11 §13)\" && exit 0"
+  },
+  "peerDependencies": {
+    "pg": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "pg": { "optional": true }
+  }
+}

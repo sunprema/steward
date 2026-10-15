@@ -1,0 +1,18 @@
+{
+  "name": "steward-mcp",
+  "version": "0.1.0",
+  "description": "Steward MCP server: branch, propose, wait-for-verdict and merge tools for agents (doc 11 §8)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "steward-mcp": "./dist/cli.js"
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "echo \"build: not wired yet (doc 11 §11)\" && exit 0",
+    "test": "echo \"test: not wired yet (doc 11 §13)\" && exit 0"
+  }
+}

@@ -1,0 +1,27 @@
+# Version catalog for adapters/ (doc 18 §2 Java). Keep the dependency tree small:
+# no framework; adapters are libraries loaded by a thin host (doc 08 §6).
+[versions]
+junit = "5.11.4"
+jqwik = "1.9.2"
+hikaricp = "6.2.1"
+postgresql = "42.7.5"
+grpc = "1.70.0"
+protobuf = "4.29.3"
+slf4j = "2.0.16"
+
+[libraries]
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+jqwik = { module = "net.jqwik:jqwik", version.ref = "jqwik" }
+hikaricp = { module = "com.zaxxer:HikariCP", version.ref = "hikaricp" }
+postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded", version.ref = "grpc" }
+grpc-protobuf = { module = "io.grpc:grpc-protobuf", version.ref = "grpc" }
+grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
+protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
+
+[bundles]
+grpc = ["grpc-netty-shaded", "grpc-protobuf", "grpc-stub", "protobuf-java"]
