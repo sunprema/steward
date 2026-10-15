@@ -225,11 +225,11 @@ Resolving doc 03 §11's open question. Evidence records (doc 12 §8.8) carry `st
 ### 10.1 Customer offboarding procedure
 
 1. `org_admin` or Steward support (audited as `operator.access`) sets `orgs.archived_at`; all API keys are revoked and SSO logins refused.
-2. Every non-terminal branch is abandoned with reason `abandoned_by_principal` attributed to `system:offboarding`; pending merges are allowed to complete or are escalated (doc 13 §6.5 failure 10), never cut short.
-3. Legal holds are reported to the customer; offboarding **must not** clear them silently; the customer confirms clearing each one (`legal_hold.cleared`).
-4. The control plane sets `retention_until = now()` for every compensation record and overlay via `SetRetention`; the data plane GC releases bodies and overlays (doc 09 §5.5, doc 05 §5.7). Headers remain in the customer's bucket; they are the customer's.
-5. After the data plane acknowledges (or after 7 days without a heartbeat), the customer uninstalls the Helm release and destroys the Terraform module (doc 14); the data-plane mTLS certificate is revoked.
-6. Control-plane metadata purge, 30 days after step 1: all rows with the org's `org_id` are deleted by `steward_migrator` in a reviewed script, except `audit_log` and `events`, which are retained to the end of the org's audit retention with `principals.email`, `display_name`, and `sso_subject` pseudonymised, and then dropped by partition. Analytics facts are deleted from the analytics store. A completion record is sent to the customer.
+2. Every non-terminal branch is abandoned with reason `abandoned_by_principal` by `system:offboarding`; pending merges complete or are escalated (doc 13 §6.5 failure 10), never cut short.
+3. Legal holds are reported to the customer and **must not** be cleared silently; the customer confirms each (`legal_hold.cleared`).
+4. The control plane sets `retention_until = now()` for every compensation record and overlay via `SetRetention`; the data-plane GC releases bodies and overlays (doc 09 §5.5, doc 05 §5.7). Headers stay in the customer's bucket.
+5. After acknowledgement (or 7 days without a heartbeat), the customer uninstalls the Helm release and Terraform module (doc 14); the mTLS certificate is revoked.
+6. Metadata purge 30 days after step 1: all rows with the org's `org_id` are deleted by `steward_migrator` in a reviewed script, except `audit_log` and `events`, retained to the end of the org's audit retention with `email`, `display_name`, and `sso_subject` pseudonymised. Analytics facts are deleted. A completion record goes to the customer.
 
 ## 11. Incident response
 
@@ -242,15 +242,15 @@ Resolving doc 03 §11's open question. Evidence records (doc 12 §8.8) carry `st
 | 3 | Availability of the control plane; a data plane that cannot merge | Business hours; status page | Postgres failover; expired lease escalation |
 | 4 | Hardening finding with no exposure | Tracked issue | Dependency CVE without a reachable path |
 
-**Runbook: suspected row data leak to the control plane.** Detection: `validate_boundary_json()` raising (doc 12 §2.4), an Ecto embedded-schema rejection (doc 07 §8), `steward_plane_oversize_total` rising (doc 10 §5), or a `tools/logcheck` sentinel hit in production logs. Steps: (1) declare Sev 1; (2) identify the sender (`data_plane_id`, `changeset_id`) from the rejection log, which carries ids only; (3) confirm the rejection was total (a rejected insert or message is never partially stored); if a value reached a store, snapshot the affected partition and the log stream, then purge; (4) determine the cause in the engine's summary builder or in a new message field; (5) ship a fix to the engine or validator; (6) notify the customer with the ids, the field, and whether anything was persisted; (7) add the shape to the boundary test corpus (§12).
+**Runbook: suspected row data leak to the control plane.** Detection: `validate_boundary_json()` raising (doc 12 §2.4), an Ecto embedded-schema rejection (doc 07 §8), `steward_plane_oversize_total` rising (doc 10 §5), or a `tools/logcheck` sentinel hit in production logs. Steps: (1) declare Sev 1; (2) identify the sender (`data_plane_id`, `changeset_id`) from the rejection log, which carries ids only; (3) confirm the rejection was total (a rejected insert or message is never partially stored); if a value reached a store, snapshot the partition and log stream, then purge; (4) find the cause (engine summary builder or a new message field) and fix it; (5) notify the customer with ids, field, and whether anything was persisted; (6) add the shape to the boundary test corpus (§12).
 
-**Runbook: grant signing key compromise.** Rotate the ES256 key pair immediately with zero overlap (push the new public key only), which invalidates every outstanding grant (≤ 5 min of reviewer disruption); audit `row_delta.read` and `compensation.*` rows for the exposure window and report them to affected customers.
+**Runbook: grant signing key compromise.** Rotate the ES256 pair with zero overlap, invalidating every outstanding grant (≤ 5 min of reviewer disruption); audit `row_delta.read` and `compensation.*` rows for the window and report to affected customers.
 
-**Runbook: data-plane mTLS key compromise.** Revoke the certificate at the control plane (stream closes with `UNAUTHENTICATED`); the data plane re-enrols (doc 14); branches keep writing throughout (doc 13 invariant 15). Review `Instruction` and `Heartbeat` history for the identity during the window.
+**Runbook: data-plane mTLS key compromise.** Revoke the certificate (stream closes `UNAUTHENTICATED`); the data plane re-enrols (doc 14); branches keep writing throughout (doc 13 invariant 15). Review `Instruction` and `Heartbeat` history for the identity.
 
-**Runbook: API key compromise.** Revoke (`DELETE /v1/api-keys/{id}`); the proxy refuses within one `RoutingUpsert`; abandon the key's open branches; nothing merged without review needs a revert because every merge went through policy, but the customer reviews the key's merged changesets and reverts if needed.
+**Runbook: API key compromise.** Revoke (`DELETE /v1/api-keys/{id}`); the proxy refuses within one `RoutingUpsert`; abandon the key's open branches; every merge went through policy, so the customer reviews the key's merged changesets and reverts if needed.
 
-**Runbook: target credential compromise.** Customer rotates in their secret store; the host rebuilds pools within 60 s (doc 08 §5.5); Steward's involvement is confirming `AUTH_FAILED` retries succeeded.
+**Runbook: target credential compromise.** Customer rotates in their secret store; the host rebuilds pools within 60 s (doc 08 §5.5).
 
 ## 12. Security testing
 
