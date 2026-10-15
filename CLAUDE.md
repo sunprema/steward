@@ -23,13 +23,14 @@ Steward is a write-control plane for AI agents: agents write to production data 
 | `adapters/` | Data-plane connectors and the gRPC host | Java 21 / Gradle | doc 08 |
 | `sdk/` | `python/`, `typescript/`, `mcp/` | Python, TypeScript | doc 11 |
 | `tools/` | `stack/` (Docker Compose local environment), `fixtures/` (synthetic data) | Bash, Python | docs 17, 18 |
+| `tasks/` | Action items per milestone, the working list handed to Claude | Markdown | doc 19 |
 | `deploy/` | Helm chart and Terraform for the data plane (later) | — | doc 14 |
 
 The Rust workspace root is the repository root (`Cargo.toml`). Java builds from `adapters/` with the Gradle wrapper. Elixir builds from `control/`.
 
 ## Milestone
 
-Work is scoped by `docs/40-engineering/19-build-roadmap.md`. Current milestone: **M0 — One branch, one merge** (Postgres only). Do not start M1 items without an explicit instruction.
+Work is scoped by `docs/40-engineering/19-build-roadmap.md`; the working list of action items is `tasks/M0-action-items.md`. Current milestone: **M0 — One branch, one merge** (Postgres only). Pick items from the tasks file, read the spec sections it names first, and tick the item with the PR number when merged. Do not start M1 items without an explicit instruction.
 
 ## Commits and PRs
 
