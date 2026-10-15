@@ -49,8 +49,8 @@ The policy engine is the control-plane component that turns a changeset into exa
 | Changeset engine `ComputeChangeset` (assertions folded in, results in `ChangesetReport`) and `RunAssertions` (re-evaluation only), doc 05 / doc 10 §5 | `Instruction` on the data-plane session stream (doc 10 §5), results reported on the same stream | Available most of the time; unreachable for minutes during a customer deploy. Latency dominated by DuckDB; budgeted in §7. Returns per-assertion `{assertion_id, status, count, sample_ref}` and nothing else |
 | Changeset engine `validate` (doc 05) | Rustler NIF, in-process, dirty scheduler | Pure function over SQL text; no I/O; < 5 ms |
 | Changeset engine test mode (doc 05) | Rustler NIF, in-memory DuckDB over fixture Parquet | Used only for policy tests with synthetic fixtures (doc 18 §7); never touches a target |
-| Metadata Postgres (doc 12) | Ecto | Source of truth for everything in §4; strongly consistent |
-| Oban | Ecto | At-least-once; every job idempotent (doc 03 §7 principle 1) |
+| Metadata Postgres (doc 12) | Ash actions (AshPostgres, Ecto underneath) | Source of truth for everything in §4; strongly consistent |
+| Oban | AshOban (same Repo) | At-least-once; every job idempotent (doc 03 §7 principle 1) |
 
 The policy engine never calls an adapter, the write proxy, or the target.
 
@@ -256,6 +256,8 @@ stateDiagram-v2
     retired --> [*]
 ```
 
+`Policy` and `PolicyVersion` are `AshStateMachine` resources in the `Steward.Policies` domain (doc 07 §5.0) with the transitions above declared literally; save, activate, retire and archive are Ash actions, and `activate` carries an `Ash.Policy` requiring `policy_admin` on the target, so the gate below is a declaration on the action rather than a check in the caller.
+
 - **Save** parses the YAML, runs the static check (§8) through the engine's `validate` NIF, records `referenced_relations`, assigns `version = max(version) + 1` for the policy, and stores the version in `draft`. Save never changes an `active` version; editing an active policy creates a new draft version. Save then runs the policy's tests against the new version (§5.5) and stores the result; failing tests do not prevent save, they prevent activation.
 - **Activate** requires the calling principal to hold the `policy_admin` capability on the target (doc 10 defines capabilities; doc 15 the audit). Preconditions: version is `draft`; static check recorded as passed; `tests_passed_at` is set for this version and the policy has at least one test (**Decision:** a policy with zero tests cannot be activated; a `block` policy with no test is a production incident waiting to happen, and one test is cheap). Effects, in one transaction: version → `active`, previous active version → `retired`, `policies.active_version_id` updated, re-evaluation job enqueued (§5.3). Activation is idempotent on the idempotency key. When `target_settings.separate_approval = true` (default, doc 12) and the target has ≥ 2 `policy_admin`s, the activating principal **must** differ from the version's author (`saved_by`), else `409 policy_activation_refused`; this is the setting's M0 meaning (doc 15 §3.3).
 - **Retire** with no successor leaves the policy with no active version; also enqueues re-evaluation, since held changesets may now auto-merge.
@@ -310,7 +312,7 @@ The harness builds the `before`/`after`/`delta` relations in an in-memory DuckDB
 | Whole policy set exceeds the data-plane budget | Engine cancels remaining assertions, returns them as `error: budget_exceeded` | Same as above | Raise `assertion_budget_s` for the target or split policies |
 | Assertion references a dropped table or column | `error_code: unknown_relation` / `unknown_column` | `hold`, `policy_error`; policy shown as broken in the policy list with the error | Author saves a new version; static check against the current catalog catches it at save |
 | Assertion result shape mismatch (`true` returns 2 rows) | `error_code: bad_shape` | `hold`, `policy_error` | As above |
-| Metadata Postgres unavailable | Ecto error | `evaluate` returns `{:error, :unavailable}`; no API writes | Oban retry; API returns 503 |
+| Metadata Postgres unavailable | `Ash.Error.Unknown` wrapping the Ecto connection error | `evaluate` returns `{:error, :unavailable}`; no API writes | Oban retry; API returns 503 |
 | Verdict insert races with a retry | Unique violation on `changeset_id` | None | Load and return the existing verdict |
 | Re-evaluation job runs while a reviewer is deciding | Review tx fails `changeset_superseded` (doc 13 §6.4) | Reviewer sees the new changeset | None needed |
 | Policy YAML on disk (CI mirror) diverges from Postgres | CI job compares digests | CI fails | Regenerate mirror from Postgres via `mix steward.policies.export` |
@@ -362,7 +364,7 @@ Traces: `evaluate` is one span with a child span for `ComputeChangeset` / `RunAs
 ## 10. Testing
 
 - **Unit (ExUnit):** YAML parsing and scope matching (property tests over principals and time windows across DST boundaries); verdict combination over every status matrix, including `block` with `policy_error`; lifecycle transitions and capability checks; idempotency of `evaluate` and `ReevaluateJob`.
-- **Policy test harness:** itself tested with a fixture suite under `control/test/policies/_harness/` covering every `expect` form, inserts/updates/deletes, joins to `before.*`, and the six worked examples in §4.2, each with a passing and a failing fixture.
+- **Policy test harness:** policy tests run through the `PolicyVersion.run_tests` Ash action in test mode (a fixture changeset instead of a data-plane `RunAssertions`), so the harness exercises the same action, policies and multitenancy the UI and CI use; itself tested with a fixture suite under `control/test/policies/_harness/` covering every `expect` form, inserts/updates/deletes, joins to `before.*`, and the six worked examples in §4.2, each with a passing and a failing fixture.
 - **Golden verdicts:** `tools/fixtures` generates synthetic changesets with agent write patterns (doc 03 §7 principle 9); their verdicts under a reference policy set are checked in as golden files and diffed in CI so a change to combination or scope logic is visible.
 - **Static validator fuzzing:** a `cargo fuzz` target in `engine/` feeds generated and mutated SQL to `validate`; any input that passes validation but references a non-allowlisted relation or function in the resulting AST, or that panics, fails the build. A corpus of known-bad statements (`COPY ... TO`, `read_csv`, `ATTACH`, nested CTE smuggling) is a regression suite.
 - **Integration (`control/test/integration`):** `evaluate` against the local stack (doc 18 §8) with a real changeset engine; data plane killed mid-evaluation to verify `computing` is retained and retried; activation triggering re-evaluation and superseding.
