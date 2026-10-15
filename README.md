@@ -6,24 +6,32 @@ Agents write through Steward into an isolated branch. Steward computes a semanti
 
 ## Status
 
-Pre-build. This repository currently holds the design documentation that engineering agents and humans build from. Code will land in the directories listed below as each milestone starts.
+Milestone M0 ("one branch, one merge") is starting. The design documentation under `docs/` is complete; `contracts/`, the local stack, and the language workspaces are scaffolded. See `docs/40-engineering/19-build-roadmap.md` for what is being built and `CLAUDE.md` for the rules.
 
 ## Repository layout
 
 ```
 docs/           Design documents — the source of truth for what gets built
-  00-foundation/
-  10-components/
-  20-contracts/
-  30-operations/
-  40-engineering/
-proxy/          Write proxy (Rust) — not yet created
-engine/         Changeset engine (Rust + DuckDB) — not yet created
-control/        Control plane and review UI (Elixir/Phoenix) — not yet created
-adapters/       Data-plane connectors (Java) — not yet created
-sdk/            Agent SDKs and MCP server — not yet created
-deploy/         Helm charts and Terraform modules — not yet created
+contracts/      Protobuf for the plane Session stream, OpenAPI for /v1, reasons.yaml
+proxy/          Write proxy (Rust)                      — workspace member
+engine/         Changeset engine + steward-overlay crate (Rust)
+control/        Control plane and review UI (Elixir/Phoenix with Ash)
+adapters/       Data-plane connectors and gRPC host (Java 21, Gradle)
+sdk/            python/, typescript/, mcp/
+tools/          stack/ (Docker Compose local environment), fixtures/ (synthetic data)
+deploy/         Helm chart and Terraform for the data plane — later
 ```
+
+## Getting started
+
+```sh
+tools/stack/stack up          # Postgres x2 + MinIO, loads the retail fixture
+./contracts/check.sh          # compile protos, validate OpenAPI, cross-check enums
+cargo build && cargo clippy -- -D warnings
+cd adapters && ./gradlew build
+```
+
+The Elixir umbrella under `control/` is created locally; `control/README.md` describes the shape.
 
 ## Reading order
 
