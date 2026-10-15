@@ -1,0 +1,21 @@
+# Rust
+target/
+# Elixir
+_build/
+deps/
+*.ez
+# Java
+build/
+.gradle/
+# Node
+node_modules/
+# Python
+__pycache__/
+.venv/
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+# Secrets
+.env
+*.pem
