@@ -1,0 +1,221 @@
+# contracts/reasons.yaml — canonical vocabularies shared by every language directory.
+#
+# Source documents: doc 12 §3 (lifecycle reasons), doc 12 §6.1 and doc 10 §6
+# (event types), doc 10 §4.2 / doc 04 §12 (proxy SQLSTATE codes).
+# The `reasons` list must match the LifecycleReason enum in
+# contracts/proto/steward/plane/v1/session.proto exactly; ./contracts/check.sh
+# enforces it. Doc 12 §3 says CI regenerates this file from the Ash enum
+# (`mix steward.reasons.export`) and fails on drift once that task exists.
+#
+# `terminal` means the reason marks a branch entering a terminal state
+# (merged, rejected, abandoned, closed). `states_from` lists the branch states
+# the reason may be recorded from; `changeset` and `merge` mark reasons that are
+# also (or only) used on changesets.superseded_reason / merges.reason.
+#
+# Not in this list on purpose (doc 12 §3):
+#   heartbeat_lost                                  a flag, never a lifecycle reason
+#   policies, policy_error, no_policy_coverage,
+#   revert_conflict                                 verdict_reason, its own enum
+
+reasons:
+  - name: snapshot_lost
+    description: Base snapshot no longer resolves (adapter SNAPSHOT_LOST); branch abandoned, merge failed.
+    terminal: true
+    states_from: [open, proposed, merging]
+    used_by: [branch, merge]
+
+  - name: overlay_lost
+    description: Overlay lost while the base snapshot survives (data-plane volume loss, doc 14 §8).
+    terminal: true
+    states_from: [open, proposed, merging]
+    used_by: [branch]
+
+  - name: stale_base
+    description: Merge found rows the base snapshot does not match; branch returns to proposed with a conflict changeset.
+    terminal: false
+    states_from: [merging]
+    used_by: [branch, changeset, merge]
+
+  - name: ttl_expired
+    description: Open-branch or held-changeset TTL elapsed; branch abandoned.
+    terminal: true
+    states_from: [open, proposed]
+    used_by: [branch]
+
+  - name: reject_with_retry
+    description: Reviewer rejected with allow_retry; branch returns to open and the changeset is superseded.
+    terminal: false
+    states_from: [proposed]
+    used_by: [branch, changeset]
+
+  - name: compute_failed
+    description: Changeset computation failed past its retry budget; changeset superseded, branch returns to open.
+    terminal: false
+    states_from: [proposed]
+    used_by: [branch, changeset]
+
+  - name: data_plane_unreachable
+    description: Data plane did not answer before the compensation checkpoint; merge failed, branch returns to proposed.
+    terminal: false
+    states_from: [merging]
+    used_by: [branch, merge]
+
+  - name: compensation_failed
+    description: Compensation record could not be persisted; merge failed, branch returns to proposed.
+    terminal: false
+    states_from: [merging]
+    used_by: [branch, merge]
+
+  - name: adapter_unavailable
+    description: Adapter unreachable past the retry budget; merge failed.
+    terminal: false
+    states_from: [merging]
+    used_by: [merge]
+
+  - name: withdrawn
+    description: Owning principal withdrew the proposal; branch returns to open and the changeset is superseded.
+    terminal: false
+    states_from: [proposed]
+    used_by: [branch, changeset]
+
+  - name: reevaluated
+    description: Changeset superseded by a policy-change re-evaluation (doc 06 §5.3).
+    terminal: false
+    states_from: [proposed]
+    used_by: [changeset]
+
+  - name: new_changeset
+    description: Changeset superseded because the branch was proposed again.
+    terminal: false
+    states_from: [open, proposed]
+    used_by: [changeset]
+
+  - name: verdict_block
+    description: Verdict outcome block; branch rejected.
+    terminal: true
+    states_from: [proposed]
+    used_by: [branch]
+
+  - name: review_rejected
+    description: Reviewer rejected without retry; branch rejected.
+    terminal: true
+    states_from: [proposed]
+    used_by: [branch]
+
+  - name: review_approved
+    description: Reviewer approved; branch moves to merging.
+    terminal: false
+    states_from: [proposed]
+    used_by: [branch]
+
+  - name: verdict_auto_merge
+    description: Verdict outcome auto-merge; branch moves to merging without review.
+    terminal: false
+    states_from: [proposed]
+    used_by: [branch]
+
+  - name: abandoned_by_principal
+    description: Owning principal (or a target admin) abandoned the branch.
+    terminal: true
+    states_from: [open, proposed]
+    used_by: [branch]
+
+  - name: merge_applied
+    description: Data plane confirmed every row applied and compensation recorded; branch merged.
+    terminal: true
+    states_from: [merging]
+    used_by: [branch]
+
+  - name: retention_elapsed
+    description: Retention window elapsed and the overlay was released; branch closed.
+    terminal: true
+    states_from: [merged, rejected, abandoned]
+    used_by: [branch]
+
+# Domain event types (doc 12 §6.1; doc 10 §6). Webhook `event_types` and
+# GET /v1/audit-events?type= accept exactly these names. `policy.version_saved`
+# is the doc 10 §6 spelling of doc 12 §6.1's `policy.saved`; doc 10 is the
+# wire contract so its spelling is canonical. `webhook.suspended` is recorded
+# by the delivery consumer (doc 10 §6) and is not deliverable to a webhook.
+events:
+  - branch.created
+  - branch.proposed
+  - branch.withdrawn
+  - branch.merging
+  - branch.merged
+  - branch.rejected
+  - branch.abandoned
+  - branch.closed
+  - branch.returned_to_open
+  - branch.heartbeat_lost
+  - changeset.computing
+  - changeset.evaluated
+  - changeset.superseded
+  - review.recorded
+  - merge.started
+  - merge.checkpointed
+  - merge.applied
+  - merge.failed
+  - merge.stalled
+  - merge.compensated
+  - target.lease_expired
+  - target.lease_released
+  - target.health_changed
+  - heartbeat.anomaly
+  - grant.issued
+  - policy.version_saved
+  - policy.activated
+  - policy.retired
+  - webhook.suspended
+
+# Proxy SQLSTATE codes an agent sees on the pgwire connection (doc 10 §4.2,
+# doc 04 §12). The SDK derives terminal state from the code, never the message.
+sqlstates:
+  - code: SD001
+    name: branch_frozen
+    retryable: false
+    terminal: false
+  - code: SD002
+    name: branch_not_routable
+    retryable: true          # SDK retries for 60 s
+    terminal: false
+  - code: SD003
+    name: branch_merged
+    retryable: false
+    terminal: true
+  - code: SD004
+    name: base_snapshot_gone
+    retryable: false
+    terminal: false
+  - code: SD005
+    name: unsupported_statement
+    retryable: false
+    terminal: false
+  - code: SD006
+    name: unclassifiable
+    retryable: false
+    terminal: false
+  - code: SD007
+    name: proxy_unavailable
+    retryable: true
+    terminal: false
+  - code: SD008
+    name: transaction_too_large
+    retryable: false
+    terminal: false
+  - code: SD009
+    name: statement_too_large
+    retryable: false
+    terminal: false
+  - code: SD00A
+    name: branch_rejected
+    retryable: false
+    terminal: true
+  - code: SD00B
+    name: branch_abandoned
+    retryable: false
+    terminal: true
+  - code: SD00C
+    name: branch_closed
+    retryable: false
+    terminal: true

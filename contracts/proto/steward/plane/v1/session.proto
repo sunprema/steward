@@ -1,0 +1,536 @@
+// steward.plane.v1 — control plane <-> data plane session (doc 10 §5).
+//
+// One bidirectional stream per data-plane identity, opened by the data plane
+// over mTLS; the client certificate SAN is the data-plane id. Instructions
+// from the control plane and their results, heartbeats, changeset reports,
+// merge outcomes and data-plane audit events all ride this stream.
+//
+// Boundary rule (doc 10 §5, doc 13 invariant 9): no message in this file may
+// carry a row. Summaries are typed aggregates, impact is name -> number,
+// evidence is counts/digests/paths, assertion results are status + count +
+// sample_ref. Message size limits: 1 MiB per message in either direction,
+// except ComputeChangeset which may carry up to 4 MiB of SQL bodies.
+//
+// Compatibility (doc 10 §2): field numbers are never renumbered or reused;
+// removed fields and enum values are `reserved`. Changes within v1 are
+// additive only.
+
+syntax = "proto3";
+
+package steward.plane.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option java_package = "io.steward.plane.v1";
+option java_multiple_files = true;
+
+// ---------------------------------------------------------------------------
+// Services
+// ---------------------------------------------------------------------------
+
+service Session {
+  // Data plane opens it. mTLS; the client certificate SAN is the data-plane id.
+  // A data plane keeps exactly one stream open per identity and reconnects
+  // with jittered backoff (1 s -> 60 s).
+  rpc Connect(stream DataPlaneMessage) returns (stream ControlPlaneMessage);
+}
+
+// One unary call over plain TLS (no client cert) that exchanges the enrolment
+// token for the identity certificate (doc 14 §6).
+// Refusal: FAILED_PRECONDITION `enrolment_refused` (token used, expired, or
+// bound to another org/data plane).
+service Enrolment {
+  rpc Enrol(EnrolRequest) returns (EnrolResponse);
+}
+
+message EnrolRequest {
+  string enrolment_token = 1;    // "stwe_..." issued by POST /v1/data-planes
+  bytes csr = 2;                 // PKCS#10 CSR for the identity certificate
+  bytes export_public_key = 3;   // public key used to wrap compensation exports (doc 09 §5.6)
+  string chart_version = 4;      // Helm chart version of the data plane
+  string contracts_version = 5;  // version of contracts/ the data plane was built against
+}
+
+message EnrolResponse {
+  bytes certificate = 1;                 // identity certificate; SAN = data_plane_id
+  bytes ca_chain = 2;                    // chain to present / trust for the mTLS session
+  repeated bytes grant_public_keys = 3;  // ES256 public keys that verify row-delta grants (doc 10 §3.3)
+  string data_plane_id = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Stream envelopes
+// ---------------------------------------------------------------------------
+
+message DataPlaneMessage {
+  string data_plane_id = 1;  // must equal the mTLS SAN; mismatch closes the stream
+  oneof body {
+    Heartbeat heartbeat = 2;
+    ChangesetReport changeset_report = 3;      // doc 13 §6.3 step 7 + step 8 results
+    InstructionResult instruction_result = 4;
+    MergeOutcome merge_outcome = 5;            // doc 13 §6.5 step 10
+    DataPlaneAuditEvent audit_event = 6;       // doc 09 §8, metadata only
+  }
+  // Version of contracts/ the sender was built against (e.g. "1.3.0"). The
+  // control plane uses it to decide which optional fields the peer understands
+  // and to count skew in `steward_plane_contracts_skew_total`.
+  string version = 7;
+}
+
+message ControlPlaneMessage {
+  oneof body {
+    HeartbeatReply heartbeat_reply = 1;
+    Instruction instruction = 2;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared enums (doc 12 §2.1, §3; doc 13 §2)
+// ---------------------------------------------------------------------------
+
+// Branch state (doc 13 §2; doc 12 §2.1 `branch_state`). Prefixed because the
+// heartbeat enums below already take the bare OPEN/MERGED/... names from doc 10.
+enum BranchState {
+  BRANCH_STATE_UNSPECIFIED = 0;
+  BRANCH_STATE_OPEN = 1;
+  BRANCH_STATE_PROPOSED = 2;
+  BRANCH_STATE_MERGING = 3;
+  BRANCH_STATE_MERGED = 4;
+  BRANCH_STATE_REJECTED = 5;
+  BRANCH_STATE_ABANDONED = 6;
+  BRANCH_STATE_CLOSED = 7;
+}
+
+// Changeset state (doc 13 §3; doc 12 §2.1 `changeset_state`).
+enum ChangesetState {
+  CHANGESET_STATE_UNSPECIFIED = 0;
+  CHANGESET_STATE_COMPUTING = 1;
+  CHANGESET_STATE_EVALUATED = 2;
+  CHANGESET_STATE_SUPERSEDED = 3;
+}
+
+// Verdict outcome (doc 13 §4; doc 12 §2.1 `verdict_outcome`).
+enum VerdictOutcome {
+  VERDICT_OUTCOME_UNSPECIFIED = 0;
+  VERDICT_OUTCOME_AUTO_MERGE = 1;
+  VERDICT_OUTCOME_HOLD = 2;
+  VERDICT_OUTCOME_BLOCK = 3;
+}
+
+// Verdict reason (doc 06 §4.3; doc 12 §2.1 `verdict_reason`). Doc 12 §3 keeps
+// policy_error / no_policy_coverage / revert_conflict out of lifecycle_reason.
+enum VerdictReason {
+  VERDICT_REASON_UNSPECIFIED = 0;
+  VERDICT_REASON_POLICIES = 1;
+  VERDICT_REASON_POLICY_ERROR = 2;
+  VERDICT_REASON_NO_POLICY_COVERAGE = 3;
+  VERDICT_REASON_REVERT_CONFLICT = 4;
+}
+
+// Lifecycle reason (doc 12 §3 `lifecycle_reason`): branches.reason,
+// changesets.superseded_reason, merges.reason and event payloads. Exactly the
+// doc 12 §3 rows minus `heartbeat_lost` (a flag, never a reason) and the three
+// verdict reasons (VerdictReason above). contracts/reasons.yaml is the
+// human-readable twin and contracts/check.sh fails if the two drift.
+enum LifecycleReason {
+  LIFECYCLE_REASON_UNSPECIFIED = 0;
+  LIFECYCLE_REASON_SNAPSHOT_LOST = 1;
+  LIFECYCLE_REASON_OVERLAY_LOST = 2;
+  LIFECYCLE_REASON_STALE_BASE = 3;
+  LIFECYCLE_REASON_TTL_EXPIRED = 4;
+  LIFECYCLE_REASON_REJECT_WITH_RETRY = 5;
+  LIFECYCLE_REASON_COMPUTE_FAILED = 6;
+  LIFECYCLE_REASON_DATA_PLANE_UNREACHABLE = 7;
+  LIFECYCLE_REASON_COMPENSATION_FAILED = 8;
+  LIFECYCLE_REASON_ADAPTER_UNAVAILABLE = 9;
+  LIFECYCLE_REASON_WITHDRAWN = 10;
+  LIFECYCLE_REASON_REEVALUATED = 11;
+  LIFECYCLE_REASON_NEW_CHANGESET = 12;
+  LIFECYCLE_REASON_VERDICT_BLOCK = 13;
+  LIFECYCLE_REASON_REVIEW_REJECTED = 14;
+  LIFECYCLE_REASON_REVIEW_APPROVED = 15;
+  LIFECYCLE_REASON_VERDICT_AUTO_MERGE = 16;
+  LIFECYCLE_REASON_ABANDONED_BY_PRINCIPAL = 17;
+  LIFECYCLE_REASON_MERGE_APPLIED = 18;
+  LIFECYCLE_REASON_RETENTION_ELAPSED = 19;
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat (doc 13 §6.8)
+// ---------------------------------------------------------------------------
+
+// The data plane's belief about a branch, coarser than BranchState on purpose
+// (doc 13 §6.8 reconciliation matrix).
+enum BelievedState {
+  BELIEVED_UNSPECIFIED = 0;
+  OPEN = 1;
+  PROPOSED = 2;
+  MERGING = 3;
+  DONE = 4;
+  DEAD = 5;
+}
+
+// The control plane's authoritative branch state, as replied to a heartbeat.
+enum AuthoritativeState {
+  AUTH_UNSPECIFIED = 0;
+  UNKNOWN = 1;  // control plane has no such branch; data plane closes the overlay
+  AUTH_OPEN = 2;
+  AUTH_PROPOSED = 3;
+  AUTH_MERGING = 4;
+  MERGED = 5;
+  REJECTED = 6;
+  ABANDONED = 7;
+  CLOSED = 8;
+}
+
+// Compensation record status (doc 09 §4; doc 12 §2.1 `compensation_status`).
+enum CompensationRecordStatus {
+  CRS_UNSPECIFIED = 0;
+  COMPLETE = 1;
+  PARTIAL = 2;
+  CONSUMED = 3;
+  EXPIRED = 4;
+  CORRUPT = 5;
+}
+
+// How a revert branch ended (doc 09 §5.3 Release).
+enum RevertOutcomeKind {
+  RO_UNSPECIFIED = 0;
+  RO_MERGED = 1;
+  RO_REJECTED = 2;
+  RO_ABANDONED = 3;
+}
+
+message Heartbeat {
+  string branch_id = 1;
+  string overlay_id = 2;
+  BelievedState believed_state = 3;
+  uint64 overlay_size_bytes = 4;  // informational; billing and retention (doc 13 §6.8)
+  uint64 overlay_rows = 5;
+  optional MergeProgress merge_progress = 6;
+  optional uint32 evidence_gap = 7;  // doc 13 §6.2 failure 4
+  optional CompensationStatus compensation_status = 8;  // doc 09 §4 index status for the branch's merge
+  optional RevertOutcome revert_outcome = 9;  // revert branches only (doc 09 §5.3)
+  optional RetentionAck retention_ack = 10;  // acknowledges the last retention/legal-hold instruction
+  bool freeze_acknowledged = 11;  // proxy fact relayed by the engine (doc 04 §5.6)
+  bool base_snapshot_gone = 12;  // adapter SNAPSHOT_LOST observed (doc 13 §6.2 failure 3)
+  google.protobuf.Timestamp sent_at = 13;
+}
+
+message MergeProgress {
+  string merge_id = 1;
+  uint64 rows_confirmed = 2;
+  uint64 rows_total = 3;
+  bool complete = 4;
+  bool compensation_persisted = 5;  // the checkpoint; before it a failure returns to proposed
+  optional string last_error_code = 6;  // adapter code: RATE_LIMITED, SCHEMA_MISMATCH, PARTIAL_APPLY, ...
+  optional google.protobuf.Timestamp retry_after = 7;
+}
+
+message CompensationStatus {
+  string merge_id = 1;
+  CompensationRecordStatus status = 2;
+  bool merge_applied = 3;
+  string header_hash = 4;
+}
+
+message RevertOutcome {
+  string revert_of_merge_id = 1;
+  RevertOutcomeKind outcome = 2;
+}
+
+message RetentionAck {
+  string merge_id = 1;
+  google.protobuf.Timestamp retention_until = 2;
+  bool legal_hold = 3;
+}
+
+message HeartbeatReply {
+  string branch_id = 1;
+  string overlay_id = 2;
+  AuthoritativeState authoritative_state = 3;
+  bool lease_renewed = 4;
+  bool freeze = 5;
+  optional google.protobuf.Timestamp retention_until = 6;  // for the branch's merge (doc 13 §9)
+  optional bool legal_hold = 7;
+  bool stale = 8;  // control plane answered from cache during Postgres failover (doc 07 §6)
+}
+
+// ---------------------------------------------------------------------------
+// Changeset report (doc 13 §6.3 step 7; doc 05 §5.2 step 9; doc 06 §5.1 step 5)
+// ---------------------------------------------------------------------------
+
+message ChangesetReport {
+  string changeset_id = 1;
+  string branch_id = 2;
+  string overlay_id = 3;
+  Summary summary = 4;  // typed aggregates only; <= 256 KiB (doc 05 §5.2)
+  repeated ImpactMetric impact = 5;
+  repeated AssertionResult assertion_results = 6;
+  repeated EvidenceRef evidence_refs = 7;
+  bytes row_delta_digest = 8;  // SHA-256
+  string reversible = 9;  // "complete" | "partial"
+  uint64 conflicts_count = 10;
+  repeated string touches_revertable_merges = 11;
+  uint64 evidence_query_count = 12;
+  repeated string evidence_tables_read = 13;
+  // freeze_marker_missing, overlay_unreadable, overlay_invalid, base_snapshot_gone,
+  // impact_scan_too_large, object_store_unavailable, adapter_unavailable, resource_exhausted
+  optional ComputeError error = 14;
+  string trace_context = 15;  // W3C traceparent (doc 16)
+}
+
+// JSON projection: doc 12 §5.1 `steward:changeset-summary/1`.
+message Summary {
+  bool truncated = 1;
+  repeated TableSummary tables = 2;
+  repeated ColumnSummary columns = 3;
+  optional string staleness_check = 4;  // values | values_only | timestamp_and_values
+  // NOTE: completed from doc 12 §5.1 — the JSON schema requires these alongside
+  // tables/columns; the control plane fills them from ChangesetReport when absent.
+  optional string conflicts_ref = 5;  // grant-served locator, never the rows
+  uint64 partial_keys_count = 6;
+}
+
+message TableSummary {
+  string table_name = 1;
+  uint64 inserts = 2;
+  uint64 updates = 3;
+  uint64 deletes = 4;
+  uint64 noop_updates = 5;
+  uint64 invalid_before_images = 6;
+}
+
+message ColumnSummary {
+  string table_name = 1;
+  string column_name = 2;
+  uint64 changed_count = 3;
+  int64 null_delta = 4;
+  optional double numeric_delta_min = 5;
+  optional double numeric_delta_max = 6;
+  optional double numeric_delta_median = 7;
+  optional double numeric_pct_median = 8;
+  uint64 distinct_before = 9;
+  uint64 distinct_after = 10;
+  repeated DistinctValue distinct_values = 11;  // only columns in summary_values_allowed (doc 05 §5.2)
+}
+
+message DistinctValue {
+  string value = 1;
+  uint64 count_before = 2;
+  uint64 count_after = 3;
+}
+
+// JSON projection: doc 12 §5.2 `steward:changeset-impact/1`.
+message ImpactMetric {
+  string name = 1;
+  optional double value = 2;
+  optional string error = 3;
+}
+
+message AssertionResult {
+  string policy_id = 1;
+  string assertion_id = 2;
+  string status = 3;  // passed | failed | error
+  uint64 count = 4;
+  bool count_capped = 5;
+  optional uint64 denominator = 6;
+  string sample_ref = 7;  // never sample_keys (doc 05 §5.4)
+  optional string error_code = 8;
+  uint32 duration_ms = 9;
+}
+
+message EvidenceRef {
+  string path = 1;
+  bytes digest = 2;
+}
+
+message ComputeError {
+  string code = 1;
+  string safe_message = 2;
+  bool retryable = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Instructions (control -> data)
+// ---------------------------------------------------------------------------
+
+message Instruction {
+  string instruction_id = 1;  // UUIDv7; results correlate on it; re-sent instructions reuse it
+  oneof body {
+    InitialiseOverlay initialise_overlay = 2;  // doc 13 §6.1 step 2
+    RoutingUpsert routing_upsert = 3;  // doc 04 §3.1; also API-key provisioning/revocation
+    FreezeWrites freeze_writes = 4;  // doc 13 §6.3 step 2 (doc 04 §5.4)
+    ComputeChangeset compute_changeset = 5;  // doc 05 §3.1
+    RunAssertions run_assertions = 6;  // doc 06 §5.3 re-evaluation against an existing row delta
+    Merge merge = 7;  // doc 13 §6.5 step 3
+    CloseOverlay close_overlay = 8;  // doc 05 §5.7, after closed/unknown
+    SetRetention set_retention = 9;  // doc 09 §3.1
+    SetLegalHold set_legal_hold = 10;
+    RegisterTarget register_target = 11;  // doc 14 §6 step 10: adapter resolves the credential and runs describe()
+  }
+  // W3C traceparent (doc 16). Trace propagation is on the message, not gRPC metadata (doc 07 §9).
+  string trace_context = 12;
+}
+
+message InitialiseOverlay {
+  string branch_id = 1;
+  string target_id = 2;
+  optional string revert_of_merge_id = 3;
+  optional string copy_overlay_from = 4;  // rejected branch id (doc 13 §4)
+}
+
+message RoutingUpsert {
+  string branch_id = 1;
+  string overlay_id = 2;
+  string target_id = 3;
+  string base_snapshot_ref = 4;
+  string credential_ref = 5;
+  AuthoritativeState state = 6;
+  string policy_version_set_hash = 7;
+  string principal_id = 8;
+  repeated ApiKeyEntry api_keys = 9;
+}
+
+message ApiKeyEntry {
+  bytes key_hash = 1;  // SHA-256 of the secret (doc 10 §3.1)
+  string principal_id = 2;
+  bool revoked = 3;
+}
+
+message FreezeWrites {
+  string branch_id = 1;
+  string overlay_id = 2;
+  bool unfreeze = 3;
+}
+
+// May carry up to 4 MiB (SQL bodies of impact queries and assertions).
+message ComputeChangeset {
+  string changeset_id = 1;
+  string branch_id = 2;
+  string overlay_id = 3;
+  string base_snapshot_ref = 4;
+  repeated ImpactQuery impact_queries = 5;
+  repeated Assertion assertions = 6;
+  uint32 assertion_budget_s = 7;
+  optional string revert_of_merge_id = 8;
+  optional string conflicts_from_merge_id = 9;  // stale_base recompute
+}
+
+message RunAssertions {
+  string changeset_id = 1;
+  string source_changeset_id = 2;
+  repeated Assertion assertions = 3;
+  uint32 assertion_budget_s = 4;
+}
+
+message ImpactQuery {
+  string id = 1;
+  string name = 2;
+  string sql = 3;
+  uint32 timeout_s = 4;
+}
+
+message Assertion {
+  string policy_id = 1;
+  string policy_version_id = 2;
+  string assertion_id = 3;
+  string sql = 4;
+  string expect_json = 5;
+  uint32 timeout_s = 6;
+}
+
+message Merge {
+  string merge_id = 1;
+  string changeset_id = 2;
+  string branch_id = 3;
+  string base_snapshot_ref = 4;
+  repeated string policy_version_ids = 5;
+  google.protobuf.Timestamp retention_until = 6;
+  bool legal_hold = 7;
+}
+
+message CloseOverlay {
+  string branch_id = 1;
+  string overlay_id = 2;
+}
+
+message SetRetention {
+  string merge_id = 1;
+  google.protobuf.Timestamp retention_until = 2;
+}
+
+// Exactly one of merge_id (per-record, doc 09 §12) or target_id (per-target,
+// TargetSettings.legal_hold) is set.
+message SetLegalHold {
+  optional string merge_id = 1;
+  optional string target_id = 2;
+  bool legal_hold = 3;
+}
+
+message RegisterTarget {
+  string target_id = 1;
+  string kind = 2;  // postgres | iceberg | snowflake | salesforce | ... (doc 12 §2.1 target_kind)
+  string credential_ref = 3;  // k8s://, aws-sm://, vault:// (doc 08 §5.5)
+}
+
+// ---------------------------------------------------------------------------
+// Results (data -> control)
+// ---------------------------------------------------------------------------
+
+message InstructionResult {
+  string instruction_id = 1;
+  bool ok = 2;
+  optional string error_code = 3;  // doc 05 typed errors, doc 08 adapter codes, or stale_base / compensation_failed
+  optional string safe_message = 4;
+  oneof body {
+    OverlayInitialised overlay_initialised = 5;
+    TargetDescription target_description = 6;  // RegisterTarget result (doc 14)
+  }
+  string trace_context = 7;  // W3C traceparent (doc 16)
+}
+
+message OverlayInitialised {
+  string overlay_id = 1;
+  string base_snapshot_ref = 2;
+  string fidelity = 3;  // TRUE_SNAPSHOT | TIMESTAMP_BOUNDED
+  google.protobuf.Timestamp opened_at = 4;
+}
+
+// Result of describe() (doc 08 §3.1). Doc 10 §5 gives a sketch; the per-table
+// detail is kept as the adapter's JSON so the proto does not fix doc 08's shape.
+// NOTE: completed from doc 08 §3.1 (describe()) and doc 12 §2.1 (snapshot_fidelity).
+message TargetDescription {
+  string target_id = 1;
+  string fidelity = 2;  // TRUE_SNAPSHOT | TIMESTAMP_BOUNDED
+  string schema_json = 3;  // doc 08 TargetDescription: tables, columns, primary keys, last-modified markers, beforeImagesCheap
+  repeated string reversible_tables = 4;
+  optional string adapter_version = 5;  // version of the adapter that produced the description
+  google.protobuf.Timestamp described_at = 6;
+}
+
+message MergeOutcome {
+  string merge_id = 1;
+  string status = 2;  // applied | failed
+  optional string failure_reason = 3;  // stale_base | compensation_failed | snapshot_lost | <adapter code>
+  bool compensation_persisted = 4;
+  optional CompensationStatus compensation = 5;
+  string trace_context = 6;  // W3C traceparent (doc 16)
+  // NOTE: completed from doc 12 §6.1 (`merge.applied` payload: rows_applied, duration_ms).
+  uint64 rows_applied = 7;
+  uint64 duration_ms = 8;
+}
+
+// Data-plane audit event (doc 09 §8): grant use against row-delta, assertion
+// samples or compensation endpoints. Metadata only.
+message DataPlaneAuditEvent {
+  string merge_id = 1;
+  string action = 2;  // e.g. row_delta.read, compensation.read, compensation.export
+  string principal_id = 3;
+  string grant_jti = 4;
+  google.protobuf.Timestamp at = 5;
+  // NOTE: completed from doc 10 §3.3 — grants are scoped to a changeset, so the
+  // event names it; empty for merge-scoped (compensation) actions.
+  string changeset_id = 6;
+  string trace_context = 7;  // W3C traceparent (doc 16)
+}
