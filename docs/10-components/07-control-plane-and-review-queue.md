@@ -25,7 +25,7 @@ The control plane is the one deployable unit Steward operates: the branch coordi
 
 | Not this component | Where it lives |
 |---|---|
-| Deciding a verdict, storing or versioning policies, running assertions | Policy engine, doc 06 (runs inside the same BEAM, as the `Steward.Policies` Ash domain in `steward_core`, but its rules are its own doc) |
+| Deciding a verdict, storing or versioning policies, running assertions | Policy engine, doc 06 (runs inside the same BEAM, as the `Steward.Policies` Ash domain in `Steward.Core`, but its rules are its own doc) |
 | The REST and gRPC contract (paths, fields, error codes, auth model) | Doc 10; this doc names the host and library |
 | Column-level schema | Doc 12; tables named here are the ones whose shape this component's behaviour depends on |
 | Row deltas, overlays, compensation, evidence payloads | Data plane, docs 04, 05, 09 |
@@ -39,12 +39,12 @@ The control plane is the one deployable unit Steward operates: the branch coordi
 
 | Caller | Protocol | Contract | Handled by |
 |---|---|---|---|
-| Agents and SDKs (doc 11) | REST over HTTPS, API-key auth | Doc 10 | `steward_web` Phoenix router |
-| Data planes (proxy, changeset engine, merge worker) | One bidirectional gRPC `Session` stream over mTLS, opened by the data plane (doc 10 §5): `Heartbeat`, `ChangesetReport`, `MergeOutcome`, `InstructionResult` arrive on it | Doc 10, protobuf in `contracts/` | `steward_web` gRPC endpoint |
-| Reviewers and admins | HTTPS, WebSocket (LiveView), SSO session | This doc §5.5 | `steward_web` LiveView |
+| Agents and SDKs (doc 11) | REST over HTTPS, API-key auth | Doc 10 | `StewardWeb` Phoenix router |
+| Data planes (proxy, changeset engine, merge worker) | One bidirectional gRPC `Session` stream over mTLS, opened by the data plane (doc 10 §5): `Heartbeat`, `ChangesetReport`, `MergeOutcome`, `InstructionResult` arrive on it | Doc 10, protobuf in `contracts/` | `StewardWeb` gRPC endpoint |
+| Reviewers and admins | HTTPS, WebSocket (LiveView), SSO session | This doc §5.5 | `StewardWeb` LiveView |
 | Reviewer's browser → data plane | HTTPS with a grant JWT (§5.6) | Doc 10 grant endpoint | Verified by the data plane, not by us |
 
-**Decision: gRPC library is `grpc` (elixir-grpc) with `protobuf` (elixir-protobuf) for codegen.** It is the only maintained Elixir server implementation, supports mTLS through its Cowboy adapter, and its generated stubs are checked in per doc 03 §8. The gRPC listener is a separate port (`50051`) under the same `steward_web` application so Phoenix and gRPC share supervision and config but not a socket.
+**Decision: gRPC library is `grpc` (elixir-grpc) with `protobuf` (elixir-protobuf) for codegen.** It is the only maintained Elixir server implementation, supports mTLS through its Cowboy adapter, and its generated stubs are checked in per doc 03 §8. The gRPC listener is a separate port (`50051`) under the `StewardWeb` namespace so Phoenix and gRPC share supervision and config but not a socket.
 
 ### 3.2 Outbound
 
@@ -75,7 +75,7 @@ Every table carries `org_id` (§8). The `targets` row carries `merging_merge_id`
 
 ```mermaid
 flowchart TB
-    App[steward_coordinator Application]
+    App[Steward.Coordinator supervisor]
     App --> Reg[Registry :branches<br/>keys: branch_id]
     App --> PS[PartitionSupervisor<br/>partitions = schedulers]
     PS --> DS1[DynamicSupervisor p1]
@@ -89,16 +89,16 @@ flowchart TB
     Boot -.->|Ash.stream! Branch.non_terminal| PS
 ```
 
-**Decision: umbrella with four apps**, matching doc 18 §1's `control/` umbrella.
+**Decision: one Phoenix application with four top-level namespaces**, dependency direction enforced by the `boundary` library at compile time (doc 18 §1). An umbrella was the original design and is kept in §11.
 
-| App | Contains | Depends on |
+| Namespace | Contains | Depends on |
 |---|---|---|
-| `steward_core` | The Ash domains `Steward.Targets` (targets, settings, memberships, impact queries), `Steward.Branches` (branches, changesets, verdicts, merges, reverts, create intents, idempotency keys, queue entries, counters), `Steward.Policies` (policies, versions, tests; doc 06), `Steward.Reviews` (reviews, review features, grants), `Steward.Audit` (events, audit log); their resources, actions, state machines, policies and changes; the `Repo` | — |
-| `steward_coordinator` | Registry, supervisors, `Branch` GenServer, `BootSweeper`, `HeartbeatFlusher`, the `Steward.Lifecycle` Spark DSL, the Reactors (`CreateBranch`, `Propose`, `Merge`, `Revert`, `Abandon`), data-plane gRPC clients | `steward_core` |
-| `steward_jobs` | AshOban configuration: every trigger and scheduled action, the cron config | `steward_core`, `steward_coordinator` |
-| `steward_web` | Phoenix router, REST controllers (one Ash action per endpoint), gRPC services, LiveView with AshPhoenix forms, PubSub, Presence | all three |
+| `Steward.Core` | The Ash domains `Steward.Targets` (targets, settings, memberships, impact queries), `Steward.Branches` (branches, changesets, verdicts, merges, reverts, create intents, idempotency keys, queue entries, counters), `Steward.Policies` (policies, versions, tests; doc 06), `Steward.Reviews` (reviews, review features, grants), `Steward.Audit` (events, audit log); their resources, actions, state machines, policies and changes; the `Repo` | — |
+| `Steward.Coordinator` | Registry, supervisors, `Branch` GenServer, `BootSweeper`, `HeartbeatFlusher`, the `Steward.Lifecycle` Spark DSL, the Reactors (`CreateBranch`, `Propose`, `Merge`, `Revert`, `Abandon`), data-plane gRPC clients | `Steward.Core` |
+| `Steward.Jobs` | AshOban configuration: every trigger and scheduled action, the cron config | `Steward.Core`, `Steward.Coordinator` |
+| `StewardWeb` | Phoenix router, REST controllers (one Ash action per endpoint), gRPC services, LiveView with AshPhoenix forms, PubSub, Presence | all three |
 
-The split earns its keep for one reason: dependency direction. `steward_core` cannot call a GenServer or render anything, so an Ash action cannot accidentally make a remote call or depend on a process being alive, which is exactly the property doc 13 invariant 10 requires; Reactors, which do make remote calls between actions, live one app up in `steward_coordinator`. Boundaries are enforced with `mix xref graph --fail-above` in CI, not trust. All four deploy as one release; separate apps are a compile-time structure, not separate pods.
+The split earns its keep for one reason: dependency direction. `Steward.Core` cannot call a GenServer or render anything, so an Ash action cannot accidentally make a remote call or depend on a process being alive, which is exactly the property doc 13 invariant 10 requires; Reactors, which do make remote calls between actions, live one layer up in `Steward.Coordinator`. Each namespace is a `boundary` with explicit `deps` and `exports`; a reference across a boundary that is not declared fails compilation. One `mix.exs`, one release, one test tree.
 
 **Decision: one GenServer per non-terminal branch, not partitioned, with a measured ceiling.** At 100k open branches: ~100k processes at roughly 4 KB heap each plus a cached row of ~1 KB is about 500 MB per node for a cluster of three, well inside a 4 GB node. Boot sweep: an Ash read action `Branch.non_terminal` streamed (`Ash.stream!`) in batches of 1,000, starting processes through the partitioned DynamicSupervisor at ~10k/s, so 100k branches boot in ~10 s and the node reports ready only after the sweep. Processes are distributed across nodes by consistent hash of branch id (`:pg` scope per target partition); a heartbeat arriving at the wrong node is forwarded with one `GenServer.call`. The partitioned alternative (one process per target, branches as map entries) is kept in §11; the switch point is 500k non-terminal branches per node or a boot sweep over 60 s, both measured by doc 17's load test.
 
@@ -108,19 +108,19 @@ The lifecycle flows are specified in doc 13 §6; each subsection below says only
 
 ### 5.0 Domain layer: Ash
 
-**Decision: the control plane's domain layer is Ash 3.x.** Every doc 12 entity is an `Ash.Resource` with the `AshPostgres` data layer, grouped into the five domains of §4 (`Steward.Targets`, `Steward.Branches`, `Steward.Policies`, `Steward.Reviews`, `Steward.Audit`) in `steward_core`. Actions are the only write path: application code **must not** build an `Ecto.Changeset` or call `Repo.insert/update/delete` outside migrations and explicitly reviewed read-model queries (doc 18 §2). Ecto remains underneath Ash; migrations are generated from the resources by `mix ash.codegen` and committed, and doc 12's DDL is the reference the generated migration **must** match, with the resources as source of truth (doc 12 §0). The pieces, and what each replaces in the earlier Ecto-context design:
+**Decision: the control plane's domain layer is Ash 3.x.** Every doc 12 entity is an `Ash.Resource` with the `AshPostgres` data layer, grouped into the five domains of §4 (`Steward.Targets`, `Steward.Branches`, `Steward.Policies`, `Steward.Reviews`, `Steward.Audit`) in `Steward.Core`. Actions are the only write path: application code **must not** build an `Ecto.Changeset` or call `Repo.insert/update/delete` outside migrations and explicitly reviewed read-model queries (doc 18 §2). Ecto remains underneath Ash; migrations are generated from the resources by `mix ash.codegen` and committed, and doc 12's DDL is the reference the generated migration **must** match, with the resources as source of truth (doc 12 §0). The pieces, and what each replaces in the earlier Ecto-context design:
 
 | Concern | Ash piece | Where |
 |---|---|---|
-| Entity shape, CRUD, read models | `Ash.Resource` + `AshPostgres`; read actions for every query the GenServers, jobs and LiveViews need | `steward_core` |
-| Branch lifecycle (doc 13 §2.1); changeset, merge, policy and policy_version lifecycles | `AshStateMachine`: `transitions` declared literally from the doc 13 table; the generated `state` attribute and transition guard replace hand-written `WHERE state = ?` checks | `steward_core` |
-| Multi-step flows with a checkpoint (doc 13 §6) | `Reactor`, one per flow (below) | `steward_coordinator` |
-| Scheduled and background work (scans, drains, consumers, export) | `AshOban` triggers and scheduled actions; consumers remain Oban jobs inserted in the action's transaction | `steward_jobs` |
-| Capabilities and API-key scopes (doc 15 §3.2) | `Ash.Policy` authorizer on every action | `steward_core` |
-| Org isolation (§8, doc 12 §10) | Ash multitenancy, attribute strategy on `org_id`; every call carries a tenant | `steward_core` |
-| Review UI forms | `AshPhoenix.Form` over the same actions | `steward_web` |
-| REST (doc 10) | Thin Phoenix controllers; **not** AshJsonApi (§11) | `steward_web` |
-| Domain events | Hand-rolled `events` resource and an `AppendEvent` change; **not** AshEvents (§11) | `steward_core` |
+| Entity shape, CRUD, read models | `Ash.Resource` + `AshPostgres`; read actions for every query the GenServers, jobs and LiveViews need | `Steward.Core` |
+| Branch lifecycle (doc 13 §2.1); changeset, merge, policy and policy_version lifecycles | `AshStateMachine`: `transitions` declared literally from the doc 13 table; the generated `state` attribute and transition guard replace hand-written `WHERE state = ?` checks | `Steward.Core` |
+| Multi-step flows with a checkpoint (doc 13 §6) | `Reactor`, one per flow (below) | `Steward.Coordinator` |
+| Scheduled and background work (scans, drains, consumers, export) | `AshOban` triggers and scheduled actions; consumers remain Oban jobs inserted in the action's transaction | `Steward.Jobs` |
+| Capabilities and API-key scopes (doc 15 §3.2) | `Ash.Policy` authorizer on every action | `Steward.Core` |
+| Org isolation (§8, doc 12 §10) | Ash multitenancy, attribute strategy on `org_id`; every call carries a tenant | `Steward.Core` |
+| Review UI forms | `AshPhoenix.Form` over the same actions | `StewardWeb` |
+| REST (doc 10) | Thin Phoenix controllers; **not** AshJsonApi (§11) | `StewardWeb` |
+| Domain events | Hand-rolled `events` resource and an `AppendEvent` change; **not** AshEvents (§11) | `Steward.Core` |
 
 **Events append rule.** Every mutating action on a truth resource declares `change Steward.Audit.AppendEvent, type: "..."`. The change registers an `after_action` hook that creates the `Steward.Audit.Event` row and the consumer Oban jobs *inside the action's transaction*, so a failed event insert rolls back the state change (§6, "events partition disk full"). This **must** be a change with an `after_action` hook, not an Ash notifier: notifiers run after commit and would break the atomicity doc 13 invariant 1 relies on. Read-model tables (`queue_entries`, `counters`) have no `AppendEvent` change.
 
@@ -160,7 +160,7 @@ end
 
 `:alert` cells are the only ones whose action writes an event (`heartbeat.anomaly`, via the `Heartbeat.record_anomaly` action) and they never auto-repair, per doc 13.
 
-**Authorization.** Every action declares its policies with `Ash.Policy`; doc 15 §3.2's capability × operation matrix is transcribed as those declarations, one `policy action(...)` block per row. Actors are either an `ApiKey` record with `scopes` (agents and services) or a `Principal` with loaded `memberships` (humans); a policy check such as `authorize_if actor_has_capability(:reviewer)` resolves through the same scope vocabulary doc 15 §3.1 names, so one check answers both actor kinds. A test enumerates every action in every domain with `Ash.Policy.Info` and fails if any action lacks a policy (§10); system jobs run with `authorize?: false` only in `steward_jobs`, reviewed.
+**Authorization.** Every action declares its policies with `Ash.Policy`; doc 15 §3.2's capability × operation matrix is transcribed as those declarations, one `policy action(...)` block per row. Actors are either an `ApiKey` record with `scopes` (agents and services) or a `Principal` with loaded `memberships` (humans); a policy check such as `authorize_if actor_has_capability(:reviewer)` resolves through the same scope vocabulary doc 15 §3.1 names, so one check answers both actor kinds. A test enumerates every action in every domain with `Ash.Policy.Info` and fails if any action lacks a policy (§10); system jobs run with `authorize?: false` only in `Steward.Jobs`, reviewed.
 
 ### 5.1 Create branch (doc 13 §6.1)
 
@@ -277,7 +277,7 @@ No JS framework (doc 18 §2); the row-delta viewer is a LiveView component that 
 
 ## 8. Security
 
-- **Org isolation.** Every resource declares `multitenancy do strategy :attribute; attribute :org_id end`, so Ash raises `Ash.Error.Invalid.TenantRequired` on any action called without a tenant and filters every read and write by `org_id`; `global? true` is allowed only on `Org` itself, and `Ash.Query.set_tenant/2` bypass (`skip_org_check`) only in `steward_jobs` system scans, reviewed. An ExUnit test enumerates every resource in every domain with `Ash.Domain.Info.resources/1` and fails if its multitenancy strategy is not `:attribute` on `org_id`, with an allowlist of exactly `orgs`, `oban_jobs`, `schema_migrations` (doc 12 §10).
+- **Org isolation.** Every resource declares `multitenancy do strategy :attribute; attribute :org_id end`, so Ash raises `Ash.Error.Invalid.TenantRequired` on any action called without a tenant and filters every read and write by `org_id`; `global? true` is allowed only on `Org` itself, and `Ash.Query.set_tenant/2` bypass (`skip_org_check`) only in `Steward.Jobs` system scans, reviewed. An ExUnit test enumerates every resource in every domain with `Ash.Domain.Info.resources/1` and fails if its multitenancy strategy is not `:attribute` on `org_id`, with an allowlist of exactly `orgs`, `oban_jobs`, `schema_migrations` (doc 12 §10).
 - **Policies on actions.** Every action carries `Ash.Policy` declarations (§5.0); a controller or LiveView passes `actor:` and `tenant:` and never checks a capability itself. The policy-coverage test (§10) is the guard against an unprotected action.
 - **Principal auth.** Agents: API keys (`stw_<prefix>_<secret>`), stored as SHA-256 of the secret with the prefix indexed; scoped to one org and a set of targets. Humans: SSO via OIDC (provider list open, §12); sessions are Phoenix encrypted cookies. Data planes: mTLS client certificates issued per data plane by doc 14's installer; the certificate's SAN is the data-plane identity used for rate limiting and `aud`.
 - **Capabilities** on `target_memberships`: `reviewer` (see queue, decide), `policy_admin` (edit policies, run policy tests), `target_admin` (settings, memberships, retention, revert). `org_admin` is on the principal. API keys carry `scopes`. Both are the actor an Ash action receives: an `ApiKey` with `scopes` or a `Principal` with `memberships`, resolved by one policy check (§5.0). Approve requires `reviewer`; self-approval is refused by a `forbid_if` on `Review.decide`.
@@ -313,7 +313,7 @@ Also emitted: `steward_genservers_total{state}` vs non-terminal rows; `steward_h
 - **AshEvents for the event log.** Would record every action as an event and support replay. Rejected for M0: doc 12 §6's `events` row shape and partitioning, the per-consumer Oban insert in the same transaction, and the "events are audit, rows are truth" rule (doc 13 invariant 1) are all easier to keep with one small `AppendEvent` change than by adapting a replay-oriented log; revisit if replay becomes a requirement.
 - **Commanded / EventStore instead of a hand-rolled `events` table.** Full event sourcing with projections. Rejected: branch state is row-shaped and already has a checkpoint discipline; event sourcing would make Postgres rows the projection and the event log the truth, inverting doc 13 invariant 1. The `events` table gives audit and consumers without the inversion.
 - **Poller instead of in-transaction Oban inserts for consumers.** One cursor over `events`. Rejected for M0: the in-tx insert is simpler and atomic; the analytics export is the one poller because it is a cursor by nature.
-- **Single Phoenix app instead of an umbrella.** Less ceremony. Rejected: doc 18 names an umbrella and the compile-time dependency direction is the cheapest enforcement of "no remote calls in a transition".
+- **Umbrella with four apps (original design).** Dependency direction enforced by app deps. Rejected: umbrellas add a mix.exs per app, duplicated config, and awkward cross-app tests for the same guarantee the `boundary` library provides inside one application.
 - **Separate frontend (React).** Rejected per doc 18 §2 until a doc proves LiveView cannot do it; the row-delta viewer is the only piece that needed JS and it is a hook, not a framework.
 - **Priority ordering in the queue.** Deferred; see §5.5.
 - **Writing `last_heartbeat_at` per heartbeat.** 3.3k row updates/s is within Postgres's reach but is pure write amplification for a 5-minute threshold; batched flush chosen.

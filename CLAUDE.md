@@ -19,7 +19,7 @@ Steward is a write-control plane for AI agents: agents write to production data 
 | `contracts/` | Protobuf for the plane `Session` stream, OpenAPI for `/v1`, `reasons.yaml` | — | docs 10, 12 |
 | `proxy/` | Write proxy (`steward-proxy`) | Rust | doc 04 |
 | `engine/` | Changeset engine (`steward-engine`) and the shared `steward-overlay` crate | Rust | docs 05, 09 |
-| `control/` | Control plane: Phoenix umbrella with Ash | Elixir | docs 06, 07 |
+| `control/` | Control plane: single Phoenix app with Ash | Elixir | docs 06, 07 |
 | `adapters/` | Data-plane connectors and the gRPC host | Java 21 / Gradle | doc 08 |
 | `sdk/` | `python/`, `typescript/`, `mcp/` | Python, TypeScript | doc 11 |
 | `tools/` | `stack/` (Docker Compose local environment), `fixtures/` (synthetic data) | Bash, Python | docs 17, 18 |

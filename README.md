@@ -31,7 +31,7 @@ cargo build && cargo clippy -- -D warnings
 cd adapters && ./gradlew build
 ```
 
-The Elixir umbrella under `control/` is created locally; `control/README.md` describes the shape.
+The Phoenix application under `control/` is created locally; `control/README.md` describes the shape.
 
 ## Reading order
 
