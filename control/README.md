@@ -64,6 +64,10 @@ mix steward.contracts.gen --check  # fail if the checked-in stubs are stale
 
 `Steward.Coordinator` (E2) runs one process per non-terminal branch, found through `Steward.Coordinator.Registry` and supervised by a `PartitionSupervisor`; process state is a cache of the row. Transitions go through `Steward.Coordinator.Branch.transition/5` (an Ash action guarded by `lock_version`); heartbeats through `Steward.Coordinator.Heartbeat.handle/2`, decided by the declared matrix in `Steward.Coordinator.HeartbeatMatrix`. Tests that start processes use `Steward.CoordinatorCase`; `boot_sweep` is off in `config/test.exs`.
 
+## Session host
+
+`StewardWeb.Plane.Server` serves `steward.plane.v1.Session` on port 50051 (E3). It is framing and identity only; `Steward.Coordinator.Plane` holds the per-data-plane sessions and the instruction queue (`Plane.send_instruction/4`: reply deadlines, re-send on reconnect), and `Plane.Upstream` handles what data planes send. Development trusts the `x-steward-data-plane-id` header; `config/runtime.exs` requires `PLANE_TLS_CERTFILE`, `PLANE_TLS_KEYFILE` and `PLANE_TLS_CACERTFILE` in production, and identifies a data plane by its client certificate. Tests start their own listener on a free port; the fake data plane dials it (`transport: {:grpc, address}`).
+
 ## Fake data plane (test support)
 
 `test/support/fake_data_plane.ex` (`Steward.FakeDataPlane`, E13) stands in for a customer's data plane so the control plane never waits on Rust. It speaks the generated `steward.plane.v1` messages, either in-process (`transport: :direct`, for coordinator and reactor tests) or over a real `Session.Connect` stream (`transport: {:grpc, address}`, for E3). Failures are scripted per instruction kind; the moduledoc maps each behaviour to the doc 13 §6 row it reproduces, and `test/fake_data_plane/failure_rows_test.exs` has one scenario per row. `Steward.FakeDataPlane.Matrix` is the data plane's half of the doc 13 §6.8 reconciliation table.
