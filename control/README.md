@@ -40,7 +40,7 @@ Local database: `tools/stack/stack up` starts `control-db` on port 5433 (databas
 ## Rules that matter most here
 
 - Actions are the only write path; no `Ecto.Changeset` or `Repo.insert` in application code (doc 18 §2).
-- Every action has a policy; a test fails the build otherwise (doc 07 §10) — not yet wired (E1b).
+- Every action has a policy; `Steward.PolicyCoverageTest` fails the build otherwise (doc 07 §10).
 - Migrations are generated with `mix ash.codegen` and committed; they must match the DDL in doc 12. Never hand-write a migration — CHECK constraints, partial unique indexes, native triggers, and the append-only grants are all declared on the resources themselves (`check_constraints`, `identities ... where:`, `custom_statements`) and flow into the generated migration. Apply with `mix ash.migrate`.
 - The `events` row is appended inside the same transaction as the state change, via `Steward.Core.Audit.AppendEvent` (an `after_action` hook), never a notifier (doc 07 §5.0).
 - Reactor steps before the checkpoint compensate; steps after it are heartbeat-repaired (doc 07 §5.0, doc 13) — the Reactors themselves are E2-E4, not yet built.
@@ -54,4 +54,12 @@ mix ash.migrate            # apply pending migrations
 mix ash.codegen --check    # drift check (MigrationDriftTest runs this)
 mix test
 mix format
+mix steward.contracts.gen          # regenerate lib/steward_plane/ from contracts/proto
+mix steward.contracts.gen --check  # fail if the checked-in stubs are stale
 ```
+
+`steward.contracts.gen` needs `python3 -m grpc_tools.protoc` (`pip install grpcio-tools`; set `STEWARD_PYTHON` to pick the interpreter) and `protoc-gen-elixir` (`mix escript.install hex protobuf`).
+
+## Fake data plane (test support)
+
+`test/support/fake_data_plane.ex` (`Steward.FakeDataPlane`, E13) stands in for a customer's data plane so the control plane never waits on Rust. It speaks the generated `steward.plane.v1` messages, either in-process (`transport: :direct`, for coordinator and reactor tests) or over a real `Session.Connect` stream (`transport: {:grpc, address}`, for E3). Failures are scripted per instruction kind; the moduledoc maps each behaviour to the doc 13 §6 row it reproduces, and `test/fake_data_plane/failure_rows_test.exs` has one scenario per row. `Steward.FakeDataPlane.Matrix` is the data plane's half of the doc 13 §6.8 reconciliation table.

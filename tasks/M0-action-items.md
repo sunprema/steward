@@ -16,13 +16,13 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` merged (add PR #)
 
 ## 1. Cross-cutting (track C)
 
-- [x] **C1 — contracts/** — `session.proto`, OpenAPI, `reasons.yaml`, `check.sh`. PR #6. *Remaining for C1:* `engine/*.proto` (`ProxyFacts`, engine ↔ proxy UDS service, doc 05 §3.1) and `adapter.proto` (doc 08 §3.1); generated stubs checked in for Rust (`tonic-build`), Elixir (`protobuf` mix task), Java (protobuf Gradle plugin); a drift check in CI that regenerates and diffs.
+- [x] **C1 — contracts/** — `session.proto`, OpenAPI, `reasons.yaml`, `check.sh`. PR #6. *Remaining for C1:* `engine/*.proto` (`ProxyFacts`, engine ↔ proxy UDS service, doc 05 §3.1) and `adapter.proto` (doc 08 §3.1); generated stubs checked in for Rust (`tonic-build`), Elixir (`protobuf` mix task), Java (protobuf Gradle plugin); a drift check in CI that regenerates and diffs. *Elixir stubs and `mix steward.contracts.gen [--check]` are done (E13); the CI step that runs `--check` lands with C2.*
 - [ ] **C2 — Build and CI** — doc 18 §1, §3, §9. GitHub Actions: `contracts/check.sh`; `cargo fmt --check`, `clippy -D warnings`, `cargo test`; `./gradlew build`; `mix format --check-formatted`, `credo --strict`, `mix test`; SDK tests. Benchmark job on a dedicated runner with the 5 % gate for `proxy/` and `engine/` (doc 17 §7). Size S.
 - [x] **C3 — tools/fixtures** — retail schema, generator, loader. PR #6. *Remaining:* golden changesets and verdicts for the policy harness (doc 06 §10, doc 17 §4), agent write-pattern recordings for loadgen (doc 03 §7 p9).
 - [x] **C4 — Local stack (base)** — control-db, target-db, MinIO. PR #6. *Remaining:* enable the `steward-proxy`, `steward-engine`, `steward-adapters`, `steward-control` services in `tools/stack/docker-compose.yml` as each lands; Neon pageserver profile per doc 08 §5.1 (J2).
 - [ ] **C5 — tools/e2e** — doc 10 §7 A–C, doc 17 §5. Scenarios 1–3 as OpenAPI contract tests against the local stack. Depends on C4 complete. Size M.
 - [ ] **C6 — tools/loadgen** — doc 04 §10, doc 16 §10. Load driver with `replay` subcommand. Depends on C3, P4. Size M.
-- [ ] **E13 — Fake data plane** — doc 07 §10. `fake_data_plane.ex` speaking the `Session` stream with scripted failures covering every doc 13 §6 row; lets the Elixir track run without Rust. Depends on C1. Size M. *Do this early.*
+- [~] **E13 — Fake data plane** — doc 07 §10. `fake_data_plane.ex` speaking the `Session` stream with scripted failures covering every doc 13 §6 row; lets the Elixir track run without Rust. Depends on C1. Size M. *Do this early.*
 - [ ] **Fake Session server (Rust side)** — doc 19 §4. A minimal control-plane stub that accepts the `Session` stream and replies to heartbeats, so the Rust track runs without Elixir. Lives in `tools/fake-control`. Size S.
 
 ## 2. Elixir control plane (track E) — `control/`
