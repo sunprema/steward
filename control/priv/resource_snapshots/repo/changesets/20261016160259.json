@@ -1,0 +1,495 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuid_generate_v7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "org_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "sequence",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"computing\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "state",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "superseded_reason",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trigger",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "rationale",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "summary",
+      "type": "map"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "impact",
+      "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "0",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "conflicts_count",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "0",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "partial_keys_count",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "reversible",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "row_delta_digest",
+      "type": "binary"
+    },
+    {
+      "allow_nil?": false,
+      "default": "[]",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "evidence_refs",
+      "type": [
+        "array",
+        "map"
+      ]
+    },
+    {
+      "allow_nil?": false,
+      "default": "0",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "evidence_gap",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "[]",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "policy_version_set",
+      "type": [
+        "array",
+        "uuid"
+      ]
+    },
+    {
+      "allow_nil?": false,
+      "default": "0",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "compute_attempts",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "computed_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "evaluated_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "0",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "lock_version",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "updated_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": true,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": "org_id",
+          "global": false,
+          "strategy": "attribute"
+        },
+        "name": "changesets_branch_id_fkey",
+        "on_delete": null,
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "branches"
+      },
+      "scale": null,
+      "size": null,
+      "source": "branch_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": true,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": "org_id",
+          "global": false,
+          "strategy": "attribute"
+        },
+        "name": "changesets_target_id_fkey",
+        "on_delete": null,
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "targets"
+      },
+      "scale": null,
+      "size": null,
+      "source": "target_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": "org_id",
+          "global": false,
+          "strategy": "attribute"
+        },
+        "name": "changesets_superseded_by_id_fkey",
+        "on_delete": null,
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "changesets"
+      },
+      "scale": null,
+      "size": null,
+      "source": "superseded_by_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "state"
+      ],
+      "base_filter": null,
+      "check": "state <> 'evaluated' OR (summary IS NOT NULL AND impact IS NOT NULL\n  AND row_delta_digest IS NOT NULL AND evaluated_at IS NOT NULL)\n",
+      "name": "evaluated_has_layers"
+    },
+    {
+      "attribute": [
+        "superseded_reason"
+      ],
+      "base_filter": null,
+      "check": "(state = 'superseded') = (superseded_reason IS NOT NULL)",
+      "name": "superseded_has_reason"
+    },
+    {
+      "attribute": [
+        "summary"
+      ],
+      "base_filter": null,
+      "check": "summary IS NULL OR pg_column_size(summary) <= 262144",
+      "name": "summary_bounded"
+    },
+    {
+      "attribute": [
+        "impact"
+      ],
+      "base_filter": null,
+      "check": "impact IS NULL OR pg_column_size(impact) <= 65536",
+      "name": "impact_bounded"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION IF EXISTS validate_boundary_json();",
+      "global?": false,
+      "name": "validate_boundary_json_fn",
+      "up": "CREATE OR REPLACE FUNCTION validate_boundary_json() RETURNS trigger AS $BODY$\nDECLARE\n  val jsonb;\nBEGIN\n  val := (row_to_json(NEW)::jsonb) -> TG_ARGV[0];\n  IF val IS NOT NULL AND (\n    jsonb_path_exists(val, '$.**.rows') OR jsonb_path_exists(val, '$.**.row') OR\n    jsonb_path_exists(val, '$.**.sample_keys') OR jsonb_path_exists(val, '$.**.before_image') OR\n    jsonb_path_exists(val, '$.**.after_image') OR jsonb_path_exists(val, '$.**.values') OR\n    jsonb_path_exists(val, '$.**.key') OR jsonb_path_exists(val, '$.**.keys')\n  ) THEN\n    RAISE EXCEPTION 'boundary violation: % contains a banned key', TG_ARGV[0];\n  END IF;\n  RETURN NEW;\nEND;\n$BODY$ LANGUAGE plpgsql;\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER IF EXISTS validate_boundary_json_summary ON changesets;",
+      "global?": false,
+      "name": "validate_boundary_json_summary",
+      "up": "CREATE TRIGGER validate_boundary_json_summary BEFORE INSERT OR UPDATE ON changesets FOR EACH ROW EXECUTE FUNCTION validate_boundary_json('summary');"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER IF EXISTS validate_boundary_json_impact ON changesets;",
+      "global?": false,
+      "name": "validate_boundary_json_impact",
+      "up": "CREATE TRIGGER validate_boundary_json_impact BEFORE INSERT OR UPDATE ON changesets FOR EACH ROW EXECUTE FUNCTION validate_boundary_json('impact');"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "58384E68752B995A6432BEBC6DA396046094D74B285B94E73759361E1FED0717",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "changesets_one_live_per_branch_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "branch_id"
+        }
+      ],
+      "name": "one_live_per_branch",
+      "nils_distinct?": true,
+      "where": "state != 'superseded'"
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "changesets_unique_org_id_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "id"
+        }
+      ],
+      "name": "unique_org_id",
+      "nils_distinct?": true,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "changesets_unique_sequence_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "branch_id"
+        },
+        {
+          "type": "atom",
+          "value": "sequence"
+        }
+      ],
+      "name": "unique_sequence",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": "org_id",
+    "global": false,
+    "strategy": "attribute"
+  },
+  "repo": "Elixir.Steward.Repo",
+  "schema": null,
+  "table": "changesets",
+  "temporal": null
+}

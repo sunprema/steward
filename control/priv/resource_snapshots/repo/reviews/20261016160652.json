@@ -1,0 +1,324 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuid_generate_v7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "org_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "decision",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "false",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "allow_retry",
+      "type": "boolean"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "note",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "idempotency_key",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "decided_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": true,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": "org_id",
+          "global": false,
+          "strategy": "attribute"
+        },
+        "name": "reviews_changeset_id_fkey",
+        "on_delete": null,
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "changesets"
+      },
+      "scale": null,
+      "size": null,
+      "source": "changeset_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": true,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": "org_id",
+          "global": false,
+          "strategy": "attribute"
+        },
+        "name": "reviews_branch_id_fkey",
+        "on_delete": null,
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "branches"
+      },
+      "scale": null,
+      "size": null,
+      "source": "branch_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": "org_id",
+          "global": false,
+          "strategy": "attribute"
+        },
+        "name": "reviews_target_id_fkey",
+        "on_delete": null,
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "targets"
+      },
+      "scale": null,
+      "size": null,
+      "source": "target_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": true,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": "org_id",
+          "global": false,
+          "strategy": "attribute"
+        },
+        "name": "reviews_reviewer_principal_id_fkey",
+        "on_delete": null,
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "principals"
+      },
+      "scale": null,
+      "size": null,
+      "source": "reviewer_principal_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "allow_retry"
+      ],
+      "base_filter": null,
+      "check": "NOT allow_retry OR decision = 'rejected'",
+      "name": "retry_only_on_reject"
+    },
+    {
+      "attribute": [
+        "decision"
+      ],
+      "base_filter": null,
+      "check": "decision <> 'edited'",
+      "name": "edit_not_in_m0"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION IF EXISTS raise_immutable();",
+      "global?": false,
+      "name": "raise_immutable_fn",
+      "up": "CREATE OR REPLACE FUNCTION raise_immutable() RETURNS trigger AS $BODY$\nBEGIN\n  RAISE EXCEPTION 'table % is append-only', TG_TABLE_NAME;\nEND;\n$BODY$ LANGUAGE plpgsql;\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER IF EXISTS reviews_immutable ON reviews;",
+      "global?": false,
+      "name": "reviews_immutable_trigger",
+      "up": "CREATE TRIGGER reviews_immutable BEFORE UPDATE OR DELETE ON reviews FOR EACH ROW EXECUTE FUNCTION raise_immutable();"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DO $BODY$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'steward_app') THEN\n    EXECUTE 'GRANT INSERT, SELECT ON reviews TO steward_app';\n  END IF;\nEND;\n$BODY$;\n",
+      "global?": false,
+      "name": "reviews_grants",
+      "up": "DO $BODY$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'steward_app') THEN\n    EXECUTE 'REVOKE UPDATE, DELETE ON reviews FROM steward_app';\n  END IF;\nEND;\n$BODY$;\n"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "A8A4AC5EF6E26640C6CD97D39E32EBDC93460F5537A229C94B987F8DF2D944F9",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "reviews_unique_changeset_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "changeset_id"
+        }
+      ],
+      "name": "unique_changeset",
+      "nils_distinct?": true,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "reviews_unique_idempotency_key_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "reviewer_principal_id"
+        },
+        {
+          "type": "atom",
+          "value": "idempotency_key"
+        }
+      ],
+      "name": "unique_idempotency_key",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": "org_id",
+    "global": false,
+    "strategy": "attribute"
+  },
+  "repo": "Elixir.Steward.Repo",
+  "schema": null,
+  "table": "reviews",
+  "temporal": null
+}

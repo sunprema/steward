@@ -1,0 +1,170 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": true,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "org_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "type",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "aggregate_type",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "aggregate_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "actor_principal_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "%{}",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "payload",
+      "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "occurred_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION IF EXISTS validate_boundary_json();",
+      "global?": false,
+      "name": "validate_boundary_json_fn",
+      "up": "CREATE OR REPLACE FUNCTION validate_boundary_json() RETURNS trigger AS $BODY$\nDECLARE\n  val jsonb;\nBEGIN\n  val := (row_to_json(NEW)::jsonb) -> TG_ARGV[0];\n  IF val IS NOT NULL AND (\n    jsonb_path_exists(val, '$.**.rows') OR jsonb_path_exists(val, '$.**.row') OR\n    jsonb_path_exists(val, '$.**.sample_keys') OR jsonb_path_exists(val, '$.**.before_image') OR\n    jsonb_path_exists(val, '$.**.after_image') OR jsonb_path_exists(val, '$.**.values') OR\n    jsonb_path_exists(val, '$.**.key') OR jsonb_path_exists(val, '$.**.keys')\n  ) THEN\n    RAISE EXCEPTION 'boundary violation: % contains a banned key', TG_ARGV[0];\n  END IF;\n  RETURN NEW;\nEND;\n$BODY$ LANGUAGE plpgsql;\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER IF EXISTS validate_boundary_json_payload ON events;",
+      "global?": false,
+      "name": "validate_boundary_json_payload",
+      "up": "CREATE TRIGGER validate_boundary_json_payload BEFORE INSERT OR UPDATE ON events FOR EACH ROW EXECUTE FUNCTION validate_boundary_json('payload');"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION IF EXISTS raise_immutable();",
+      "global?": false,
+      "name": "raise_immutable_fn",
+      "up": "CREATE OR REPLACE FUNCTION raise_immutable() RETURNS trigger AS $BODY$\nBEGIN\n  RAISE EXCEPTION 'table % is append-only', TG_TABLE_NAME;\nEND;\n$BODY$ LANGUAGE plpgsql;\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER IF EXISTS events_immutable ON events;",
+      "global?": false,
+      "name": "events_immutable_trigger",
+      "up": "CREATE TRIGGER events_immutable BEFORE UPDATE OR DELETE ON events FOR EACH ROW EXECUTE FUNCTION raise_immutable();"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DO $BODY$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'steward_app') THEN\n    EXECUTE 'GRANT INSERT, SELECT ON events TO steward_app';\n  END IF;\nEND;\n$BODY$;\n",
+      "global?": false,
+      "name": "events_grants",
+      "up": "DO $BODY$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'steward_app') THEN\n    EXECUTE 'REVOKE UPDATE, DELETE ON events FROM steward_app';\n  END IF;\nEND;\n$BODY$;\n"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "0F11FDFC2546B7B57FA60945AF8CFE3D4677133C4C124FF8AA93F9FBB77DF21C",
+  "identities": [],
+  "multitenancy": {
+    "attribute": "org_id",
+    "global": false,
+    "strategy": "attribute"
+  },
+  "repo": "Elixir.Steward.Repo",
+  "schema": null,
+  "table": "events",
+  "temporal": null
+}
