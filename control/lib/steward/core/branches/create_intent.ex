@@ -64,7 +64,7 @@ defmodule Steward.Core.Branches.CreateIntent do
       authorize_if {Scope, scope: "branch:write"}
     end
 
-    policy action([:commit, :fail, :supersede]) do
+    policy action([:commit, :fail, :supersede, :restart]) do
       authorize_if {SystemActor, roles: [:coordinator]}
     end
   end
@@ -80,6 +80,13 @@ defmodule Steward.Core.Branches.CreateIntent do
     update :commit do
       accept [:branch_id]
       change set_attribute(:state, :committed)
+    end
+
+    # A retry of an attempt that did not complete: there is one intent per
+    # (principal, idempotency key), so the next attempt starts it again.
+    update :restart do
+      accept []
+      change set_attribute(:state, :pending)
     end
 
     update :fail do

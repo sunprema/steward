@@ -153,9 +153,14 @@ defmodule Steward.Coordinator.Branch do
     with {:ok, record} <- load(state) do
       state = %{state | record: record}
 
-      if record.state in @terminal,
-        do: :ignore,
-        else: {:ok, schedule_tick(state)}
+      if record.state in @terminal do
+        :ignore
+      else
+        # Changes made behind this process (a job, a reactor, another node) arrive here
+        # after commit (`Steward.Core.Branches.Notifier`).
+        Phoenix.PubSub.subscribe(Steward.PubSub, Steward.Core.Branches.Notifier.topic(branch_id))
+        {:ok, schedule_tick(state)}
+      end
     else
       {:error, :not_found} -> {:stop, :not_found}
       {:error, _unavailable} -> {:stop, :unavailable}
@@ -210,6 +215,14 @@ defmodule Steward.Coordinator.Branch do
     if state.record.state in @terminal,
       do: {:stop, :normal, state},
       else: {:noreply, schedule_tick(state)}
+  end
+
+  # Newer than what we hold: re-read. The echo of our own transitions carries the
+  # version we already have, and a heartbeat's telemetry columns do not bump it.
+  def handle_info({:branch_changed, _id, version}, state) do
+    if version > state.record.lock_version,
+      do: after_refresh(refresh_cache(state)),
+      else: {:noreply, state}
   end
 
   def handle_info(_ignored, state), do: {:noreply, state}

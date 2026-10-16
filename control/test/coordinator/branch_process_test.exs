@@ -146,19 +146,27 @@ defmodule Steward.Coordinator.BranchProcessTest do
          ctx do
       {:ok, pid} = BranchProcess.ensure_started(ctx.org.id, ctx.branch.id)
 
-      # Another writer (another node, a reactor) moves the branch behind the process's back.
-      moved = out_of_band(ctx, ctx.branch, :propose, %{})
+      # Another writer moves the branch behind the process's back, and the notification is
+      # lost (a partition, a node that was down): written straight to the row, which is
+      # exactly the case the `lock_version` guard exists for.
+      Ecto.Adapters.SQL.query!(
+        Steward.Repo,
+        "UPDATE branches SET state = 'proposed', proposed_at = now(), lock_version = lock_version + 1 WHERE id = $1",
+        [Ecto.UUID.dump!(ctx.branch.id)]
+      )
+
+      moved_version = ctx.branch.lock_version + 1
       assert BranchProcess.get(pid).lock_version == ctx.branch.lock_version
 
       # `abandon` is valid from the cached `open`; the row has moved on, so the lock refuses it.
       assert {:error, :stale_transition} =
                BranchProcess.transition(ctx.org.id, ctx.branch.id, :abandon, abandon_params(ctx))
 
-      assert BranchProcess.get(pid).lock_version == moved.lock_version
+      assert BranchProcess.get(pid).lock_version == moved_version
       assert BranchProcess.get(pid).state == :proposed
 
       assert {:ok, %{state: :open}} =
-               BranchProcess.transition(ctx.org.id, ctx.branch.id, :return_to_open, %{})
+               BranchProcess.transition(ctx.org.id, ctx.branch.id, :withdraw, %{})
     end
 
     test "concurrent transitions are serialised; exactly one propose wins", ctx do
@@ -219,6 +227,32 @@ defmodule Steward.Coordinator.BranchProcessTest do
       out_of_band(ctx, ctx.branch, :abandon, abandon_params(ctx))
 
       assert_receive {:DOWN, ^ref, _, _, :normal}, 2_000
+    end
+  end
+
+  describe "notifications (Steward.Core.Branches.Notifier)" do
+    test "a change made behind the process reaches its cache after commit, without waiting for the tick",
+         ctx do
+      {:ok, pid} = BranchProcess.ensure_started(ctx.org.id, ctx.branch.id)
+      out_of_band(ctx, ctx.branch, :propose, %{})
+
+      assert eventually(fn -> BranchProcess.get(pid).state == :proposed end)
+    end
+
+    test "a terminal change behind its back stops the process", ctx do
+      {:ok, pid} = BranchProcess.ensure_started(ctx.org.id, ctx.branch.id)
+      ref = Process.monitor(pid)
+      out_of_band(ctx, ctx.branch, :abandon, abandon_params(ctx))
+
+      assert_receive {:DOWN, ^ref, _, _, :normal}, 2_000
+    end
+
+    test "the echo of the process's own transition is not a second read", ctx do
+      {:ok, pid} = BranchProcess.ensure_started(ctx.org.id, ctx.branch.id)
+      {:ok, updated} = BranchProcess.transition(ctx.org.id, ctx.branch.id, :propose)
+      Process.sleep(50)
+
+      assert BranchProcess.get(pid).lock_version == updated.lock_version
     end
   end
 

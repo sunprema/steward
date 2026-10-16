@@ -34,20 +34,23 @@ defmodule Steward.Coordinator.StateMachineDeclarationTest do
              ])
 
   # The action that makes each doc edge, and the rows of the table it appears in.
-  @edge_action %{
-    {:open, :proposed} => :propose,
-    {:proposed, :open} => :return_to_open,
-    {:proposed, :merging} => :start_merge,
-    {:proposed, :rejected} => :reject,
-    {:open, :abandoned} => :abandon,
-    {:proposed, :abandoned} => :abandon,
-    {:merging, :merged} => :complete_merge,
-    {:merging, :proposed} => :fail_merge,
-    {:merging, :abandoned} => :lose_snapshot,
-    {:merged, :closed} => :close,
-    {:rejected, :closed} => :close,
-    {:abandoned, :closed} => :close
-  }
+  @edge_action [
+    {{:open, :proposed}, :propose},
+    {{:proposed, :open}, :return_to_open},
+    {{:proposed, :open}, :withdraw},
+    {{:proposed, :merging}, :start_merge},
+    {{:proposed, :rejected}, :reject},
+    {{:open, :abandoned}, :abandon},
+    {{:open, :abandoned}, :expire_ttl},
+    {{:proposed, :rejected}, :reject_blocked},
+    {{:proposed, :abandoned}, :abandon},
+    {{:merging, :merged}, :complete_merge},
+    {{:merging, :proposed}, :fail_merge},
+    {{:merging, :abandoned}, :lose_snapshot},
+    {{:merged, :closed}, :close},
+    {{:rejected, :closed}, :close},
+    {{:abandoned, :closed}, :close}
+  ]
 
   test "the declared transitions are exactly doc 13 §2.1's" do
     declared =
@@ -74,6 +77,9 @@ defmodule Steward.Coordinator.StateMachineDeclarationTest do
   @actions [
     :propose,
     :return_to_open,
+    :withdraw,
+    :expire_ttl,
+    :reject_blocked,
     :start_merge,
     :reject,
     :abandon,
@@ -99,6 +105,10 @@ defmodule Steward.Coordinator.StateMachineDeclarationTest do
     |> Ash.update!()
   end
 
+  # The two job transitions are the jobs role's alone.
+  defp actor_for(_ctx, action) when action in [:expire_ttl, :reject_blocked], do: System.jobs()
+  defp actor_for(ctx, _action), do: System.new(:coordinator, ctx.org.id)
+
   defp params(_ctx, :start_merge), do: %{merge_id: uuid()}
   defp params(_ctx, :complete_merge), do: %{merge_id: uuid(), terminal_by_job: "test"}
   defp params(_ctx, :reject), do: %{reason: :review_rejected, terminal_by_job: "test"}
@@ -108,6 +118,9 @@ defmodule Steward.Coordinator.StateMachineDeclarationTest do
 
   defp params(_ctx, :lose_snapshot), do: %{reason: :snapshot_lost, terminal_by_job: "test"}
   defp params(_ctx, :fail_merge), do: %{reason: :stale_base}
+  defp params(_ctx, :return_to_open), do: %{reason: :compute_failed}
+  defp params(_ctx, :expire_ttl), do: %{}
+  defp params(_ctx, :reject_blocked), do: %{}
 
   defp params(_ctx, :close),
     do: %{overlay_released_at: DateTime.utc_now(), terminal_by_job: "test"}
@@ -147,7 +160,7 @@ defmodule Steward.Coordinator.StateMachineDeclarationTest do
         record
         |> Ash.Changeset.for_update(unquote(action), params(ctx, unquote(action)),
           tenant: ctx.org.id,
-          actor: System.new(:coordinator, ctx.org.id)
+          actor: actor_for(ctx, unquote(action))
         )
         |> Ash.update()
 

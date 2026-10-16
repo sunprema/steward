@@ -108,7 +108,7 @@ defmodule Steward.Coordinator.FakeDataPlaneReconciliationTest do
     exchange(ctx)
     assert {:error, :branch_frozen} = FakeDataPlane.write(ctx.dp, b.id)
 
-    transition!(ctx, b, :return_to_open)
+    transition!(ctx, b, :withdraw)
     assert [%{authoritative: :open}] = exchange(ctx)
     assert %{believed: :open, frozen: false, freeze_marker: false} = overlay(ctx, b)
     assert :ok = FakeDataPlane.write(ctx.dp, b.id)
@@ -206,7 +206,7 @@ defmodule Steward.Coordinator.FakeDataPlaneReconciliationTest do
     assert_receive {:DOWN, ^ref, _, _, _}
     stop_all()
 
-    assert Coordinator.whereis(b.id) == nil
+    eventually(fn -> Coordinator.whereis(b.id) == nil end)
     assert [%{authoritative: :open}] = exchange(ctx)
     assert Coordinator.whereis(b.id)
   end

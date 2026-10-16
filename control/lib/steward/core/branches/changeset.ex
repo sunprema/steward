@@ -6,7 +6,8 @@ defmodule Steward.Core.Branches.Changeset do
     domain: Steward.Core.Branches,
     authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer,
-    extensions: [AshStateMachine]
+    notifiers: [],
+    extensions: [AshStateMachine, AshOban]
 
   postgres do
     table "changesets"
@@ -65,8 +66,32 @@ defmodule Steward.Core.Branches.Changeset do
     state_attribute :state
 
     transitions do
-      transition :evaluate, from: :computing, to: :evaluated
+      transition :record_verdict, from: :computing, to: :evaluated
       transition :supersede, from: [:computing, :evaluated], to: :superseded
+    end
+  end
+
+  oban do
+    list_tenants Steward.Core.Targets.TenantList
+    use_tenant_from_record? true
+
+    triggers do
+      # Doc 13 §6.3 f7: an evaluated `hold` on a still-proposed branch with no queue entry gets one.
+      # (An `auto-merge` with no merge row is started by the `Merge` reactor's reconciliation, E6.)
+      trigger :ensure_queue_entry do
+        action :ensure_queue_entry
+
+        where expr(
+                state == :evaluated and branch.state == :proposed and
+                  exists(verdict, outcome == :hold) and not exists(queue_entry, true)
+              )
+
+        scheduler_cron "* * * * *"
+        queue :changeset_ensure_queue_entry
+        worker_module_name Steward.Core.Branches.Workers.EnsureQueueEntry
+        scheduler_module_name Steward.Core.Branches.Schedulers.EnsureQueueEntry
+        default_actor Steward.Core.Authz.System.jobs()
+      end
     end
   end
 
@@ -111,6 +136,14 @@ defmodule Steward.Core.Branches.Changeset do
       attribute_writable? true
     end
 
+    has_one :verdict, Steward.Core.Branches.Verdict do
+      destination_attribute :changeset_id
+    end
+
+    has_one :queue_entry, Steward.Core.Branches.QueueEntry do
+      destination_attribute :changeset_id
+    end
+
     belongs_to :superseded_by, __MODULE__ do
       attribute_writable? true
     end
@@ -128,7 +161,11 @@ defmodule Steward.Core.Branches.Changeset do
       authorize_if {ScopedRead, scope: "changeset:read"}
     end
 
-    policy action([:create, :evaluate]) do
+    policy action([:ensure_queue_entry]) do
+      authorize_if {SystemActor, roles: [:coordinator, :jobs]}
+    end
+
+    policy action([:create, :record_verdict]) do
       authorize_if {SystemActor, roles: [:coordinator]}
     end
 
@@ -169,16 +206,28 @@ defmodule Steward.Core.Branches.Changeset do
       change set_attribute(:computed_at, &DateTime.utc_now/0)
     end
 
-    update :evaluate do
+    # The `Propose` checkpoint (doc 07 §5.2): `computing → evaluated` and the
+    # verdict row in one transaction, then the `changeset.evaluated` event.
+    update :record_verdict do
       accept []
       require_atomic? false
+      argument :verdict, :map, allow_nil?: false
       change transition_state(:evaluated)
       change set_attribute(:evaluated_at, &DateTime.utc_now/0)
+      change Steward.Core.Branches.Changes.CreateVerdict
 
       change {Steward.Core.Audit.AppendEvent,
               type: "changeset.evaluated",
               aggregate_type: "changeset",
               payload: &__MODULE__.evaluated_payload/2}
+    end
+
+    # The queue entry of a held changeset, if the flow that should have made it died
+    # (doc 13 §6.3 f7). Idempotent: `queue_entries` is unique on `changeset_id`.
+    update :ensure_queue_entry do
+      accept []
+      require_atomic? false
+      change Steward.Core.Branches.Changes.EnsureQueueEntry
     end
 
     update :bump_compute_attempts do

@@ -91,14 +91,12 @@ defmodule Steward.Coordinator.SweepsTest do
       {:ok, pid} = BranchProcess.ensure_started(oa.id, b.id)
       ref = Process.monitor(pid)
 
-      b
-      |> Ash.Changeset.for_update(
-        :abandon,
-        %{reason: :abandoned_by_principal, terminal_by_principal_id: pa.id},
-        tenant: oa.id,
-        actor: System.new(:coordinator, oa.id)
+      # Terminal behind the process's back, with the notification lost: straight to the row.
+      Ecto.Adapters.SQL.query!(
+        Steward.Repo,
+        "UPDATE branches SET state = 'abandoned', reason = 'abandoned_by_principal', terminal_at = now(), terminal_by_job = 'test', lock_version = lock_version + 1 WHERE id = $1",
+        [Ecto.UUID.dump!(b.id)]
       )
-      |> Ash.update!()
 
       assert %{stopped: 1} = TerminalProcessSweep.run()
       assert_receive {:DOWN, ^ref, _, _, :normal}

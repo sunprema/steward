@@ -16,6 +16,8 @@ defmodule Steward.Core.Authz.Subject do
     cond do
       is_nil(actor_org) -> false
       is_nil(tenant) -> Keyword.get(opts, :tenantless, false)
+      # `System.jobs/0`: a job spans orgs but is always run with the org as tenant.
+      actor_org == :all -> true
       true -> to_string(tenant) == to_string(actor_org)
     end
   end

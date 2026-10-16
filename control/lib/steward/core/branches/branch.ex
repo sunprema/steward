@@ -14,7 +14,8 @@ defmodule Steward.Core.Branches.Branch do
     domain: Steward.Core.Branches,
     authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer,
-    extensions: [AshStateMachine]
+    notifiers: [Steward.Core.Branches.Notifier],
+    extensions: [AshStateMachine, AshOban]
 
   postgres do
     table "branches"
@@ -61,9 +62,12 @@ defmodule Steward.Core.Branches.Branch do
     transitions do
       transition :propose, from: :open, to: :proposed
       transition :return_to_open, from: :proposed, to: :open
+      transition :withdraw, from: :proposed, to: :open
       transition :start_merge, from: :proposed, to: :merging
       transition :reject, from: :proposed, to: :rejected
       transition :abandon, from: [:open, :proposed], to: :abandoned
+      transition :expire_ttl, from: :open, to: :abandoned
+      transition :reject_blocked, from: :proposed, to: :rejected
       transition :lose_snapshot, from: [:open, :proposed, :merging], to: :abandoned
       transition :complete_merge, from: :merging, to: :merged
       transition :fail_merge, from: :merging, to: :proposed
@@ -71,8 +75,46 @@ defmodule Steward.Core.Branches.Branch do
     end
   end
 
+  # Scheduled work that is pure Ash (doc 07 §5.0, §6). The jobs that call into the
+  # coordinator are plain Oban workers in `Steward.Jobs`.
+  oban do
+    list_tenants Steward.Core.Targets.TenantList
+    use_tenant_from_record? true
+
+    triggers do
+      # Doc 13 §6.7: an `open` branch not proposed within its TTL is abandoned.
+      trigger :expire_ttl do
+        action :expire_ttl
+        where expr(state == :open and not is_nil(ttl_expires_at) and ttl_expires_at < now())
+        scheduler_cron "* * * * *"
+        queue :branch_expire_ttl
+        worker_module_name Steward.Core.Branches.Workers.ExpireTtl
+        scheduler_module_name Steward.Core.Branches.Schedulers.ExpireTtl
+        default_actor Steward.Core.Authz.System.jobs()
+      end
+
+      # Doc 13 §6.3 f7: every `block` verdict whose branch is not `rejected` is set `rejected`.
+      trigger :reject_blocked do
+        action :reject_blocked
+
+        where expr(
+                state == :proposed and
+                  exists(changesets, state == :evaluated and exists(verdict, outcome == :block))
+              )
+
+        scheduler_cron "* * * * *"
+        queue :branch_reject_blocked
+        worker_module_name Steward.Core.Branches.Workers.RejectBlocked
+        scheduler_module_name Steward.Core.Branches.Schedulers.RejectBlocked
+        default_actor Steward.Core.Authz.System.jobs()
+      end
+    end
+  end
+
   attributes do
-    uuid_v7_primary_key :id
+    # Writable: the control plane picks the branch id before asking the data plane
+    # for an overlay, and the row is written last with that same id (doc 13 §6.1).
+    uuid_v7_primary_key :id, writable?: true
     attribute :org_id, :uuid, allow_nil?: false
 
     attribute :overlay_id, :uuid, allow_nil?: false
@@ -115,6 +157,10 @@ defmodule Steward.Core.Branches.Branch do
       attribute_writable? true
     end
 
+    has_many :changesets, Steward.Core.Branches.Changeset do
+      destination_attribute :branch_id
+    end
+
     belongs_to :terminal_by_principal, Steward.Core.Targets.Principal do
       source_attribute :terminal_by_principal_id
       attribute_writable? true
@@ -150,6 +196,10 @@ defmodule Steward.Core.Branches.Branch do
     # (retry-allowed rejection, stale base).
     policy action([:return_to_open]) do
       authorize_if {SystemActor, roles: [:coordinator]}
+    end
+
+    policy action([:withdraw]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
       forbid_unless {ActsAs, attribute: :principal_id}
       authorize_if {Scope, scope: "branch:write"}
     end
@@ -160,6 +210,10 @@ defmodule Steward.Core.Branches.Branch do
       authorize_if {Scope, scope: "target:admin"}
       forbid_unless {ActsAs, attribute: :principal_id}
       authorize_if {Scope, scope: "branch:write"}
+    end
+
+    policy action([:expire_ttl, :reject_blocked]) do
+      authorize_if {SystemActor, roles: [:jobs]}
     end
 
     policy action([:lose_snapshot]) do
@@ -193,6 +247,7 @@ defmodule Steward.Core.Branches.Branch do
       primary? true
 
       accept [
+        :id,
         :target_id,
         :principal_id,
         :overlay_id,
@@ -213,19 +268,82 @@ defmodule Steward.Core.Branches.Branch do
     update :propose do
       change optimistic_lock(:lock_version)
       accept []
+      require_atomic? false
+      argument :rationale, :string, allow_nil?: true, constraints: [max_length: 4096]
+      argument :trigger, :string, allow_nil?: true, default: "propose"
       change transition_state(:proposed)
       change set_attribute(:proposed_at, &DateTime.utc_now/0)
+      change Steward.Core.Branches.Changes.OpenChangeset
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.proposed",
+              aggregate_type: "branch",
+              payload: &__MODULE__.proposed_payload/2}
+    end
+
+    # Owner-facing `proposed → open` (doc 13 §5, §6.3): the live changeset is
+    # superseded (`withdrawn`). `return_to_open` is the same edge for the system
+    # (a reactor unwinding, reject-with-retry) and carries its own reason.
+    update :withdraw do
+      change optimistic_lock(:lock_version)
+      accept []
+      require_atomic? false
+      change transition_state(:open)
+      change set_attribute(:merge_wait, false)
+      change {Steward.Core.Branches.Changes.LeaveProposed, supersede: :withdrawn, queue: true}
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.withdrawn",
+              aggregate_type: "branch",
+              payload: &__MODULE__.no_payload/2}
     end
 
     update :return_to_open do
       change optimistic_lock(:lock_version)
       accept [:reason]
+      validate present(:reason)
       require_atomic? false
       change transition_state(:open)
       change set_attribute(:merge_wait, false)
+      change {Steward.Core.Branches.Changes.LeaveProposed, supersede: :branch_reason, queue: true}
 
       change {Steward.Core.Audit.AppendEvent,
               type: "branch.returned_to_open",
+              aggregate_type: "branch",
+              payload: &__MODULE__.reason_payload/2}
+    end
+
+    # The TTL job's transition (doc 13 §6.7). Not the owner's `abandon`: the actor is a
+    # job, the reason is fixed, and the job is named instead of a principal.
+    update :expire_ttl do
+      change optimistic_lock(:lock_version)
+      accept []
+      require_atomic? false
+      change transition_state(:abandoned)
+      change set_attribute(:reason, :ttl_expired)
+      change set_attribute(:terminal_by_job, "ttl")
+      change set_attribute(:terminal_at, &DateTime.utc_now/0)
+      change {Steward.Core.Branches.Changes.LeaveProposed, supersede: :branch_reason, queue: true}
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.abandoned",
+              aggregate_type: "branch",
+              payload: &__MODULE__.abandoned_payload/2}
+    end
+
+    # The reconciliation of a `block` verdict whose follow-up never ran (doc 13 §6.3 f7).
+    update :reject_blocked do
+      change optimistic_lock(:lock_version)
+      accept []
+      require_atomic? false
+      change transition_state(:rejected)
+      change set_attribute(:reason, :verdict_block)
+      change set_attribute(:terminal_by_job, "reconcile")
+      change set_attribute(:terminal_at, &DateTime.utc_now/0)
+      change {Steward.Core.Branches.Changes.LeaveProposed, queue: true}
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.rejected",
               aggregate_type: "branch",
               payload: &__MODULE__.reason_payload/2}
     end
@@ -249,6 +367,7 @@ defmodule Steward.Core.Branches.Branch do
       require_atomic? false
       change transition_state(:rejected)
       change set_attribute(:terminal_at, &DateTime.utc_now/0)
+      change {Steward.Core.Branches.Changes.LeaveProposed, queue: true}
 
       change {Steward.Core.Audit.AppendEvent,
               type: "branch.rejected",
@@ -262,6 +381,7 @@ defmodule Steward.Core.Branches.Branch do
       require_atomic? false
       change transition_state(:abandoned)
       change set_attribute(:terminal_at, &DateTime.utc_now/0)
+      change {Steward.Core.Branches.Changes.LeaveProposed, supersede: :branch_reason, queue: true}
 
       change {Steward.Core.Audit.AppendEvent,
               type: "branch.abandoned",
@@ -275,6 +395,7 @@ defmodule Steward.Core.Branches.Branch do
       require_atomic? false
       change transition_state(:abandoned)
       change set_attribute(:terminal_at, &DateTime.utc_now/0)
+      change {Steward.Core.Branches.Changes.LeaveProposed, supersede: :branch_reason, queue: true}
 
       change {Steward.Core.Audit.AppendEvent,
               type: "branch.abandoned",
@@ -333,6 +454,10 @@ defmodule Steward.Core.Branches.Branch do
   end
 
   def reason_payload(_changeset, record), do: %{reason: record.reason}
+
+  def no_payload(_changeset, _record), do: %{}
+
+  def proposed_payload(_changeset, record), do: %{proposed_at: record.proposed_at}
 
   def abandoned_payload(changeset, record) do
     %{from_state: changeset.data.state, reason: record.reason}

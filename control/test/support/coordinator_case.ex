@@ -65,7 +65,25 @@ defmodule Steward.CoordinatorCase do
     end)
   end
 
+  @doc "Sets `config :steward, Steward.Coordinator` keys for this test, restored afterwards."
+  def put_coordinator_env(overrides) do
+    previous = Application.get_env(:steward, Steward.Coordinator, [])
+    Application.put_env(:steward, Steward.Coordinator, Keyword.merge(previous, overrides))
+
+    ExUnit.Callbacks.on_exit(fn ->
+      Application.put_env(:steward, Steward.Coordinator, previous)
+    end)
+  end
+
   def stop_all do
+    # A fake whose handshake was refused leaves the gRPC client's connection process
+    # retrying forever against the listener; it must not outlive its test.
+    if Process.whereis(GRPC.Client.Supervisor) do
+      for {_, pid, _, _} <- DynamicSupervisor.which_children(GRPC.Client.Supervisor) do
+        DynamicSupervisor.terminate_child(GRPC.Client.Supervisor, pid)
+      end
+    end
+
     # Sessions are keyed by data-plane id and outlive streams; a test must not inherit one.
     for {_, pid, _, _} <- DynamicSupervisor.which_children(Steward.Coordinator.Plane.sessions()) do
       DynamicSupervisor.terminate_child(Steward.Coordinator.Plane.sessions(), pid)

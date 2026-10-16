@@ -16,11 +16,19 @@ defmodule Steward.Core.Authz.System do
   @enforce_keys [:role, :org_id]
   defstruct [:role, :org_id]
 
-  @type t :: %__MODULE__{role: :coordinator | :session | :jobs | :api, org_id: String.t()}
+  @type t :: %__MODULE__{role: :coordinator | :session | :jobs | :api, org_id: String.t() | :all}
   @roles [:coordinator, :session, :jobs, :api]
 
   @doc "Builds a system actor for `role` acting within `org_id`."
   def new(role, org_id) when role in @roles, do: %__MODULE__{role: role, org_id: org_id}
+
+  @doc """
+  The actor of a scheduled job that runs for every org (`Steward.Jobs`, AshOban
+  triggers): role `:jobs`, org `:all`. Only the jobs role may span orgs, and it
+  still needs a tenant on every query it makes: the scheduler lists the tenants
+  and runs each trigger once per org (doc 15 §4.1 point 1, doc 07 §8).
+  """
+  def jobs, do: %__MODULE__{role: :jobs, org_id: :all}
   def roles, do: @roles
 
   defimpl Steward.Core.Authz.Actor do

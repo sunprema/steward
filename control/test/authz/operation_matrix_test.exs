@@ -119,10 +119,10 @@ defmodule Steward.Authz.OperationMatrixTest do
       other_agent = key(@other_p, ~w(branch:write))
 
       check([
-        {"withdraw: owner A", a, {branch(), :return_to_open}, true},
-        {"withdraw: another agent", other_agent, {branch(), :return_to_open}, false},
-        {"withdraw: R", r, {branch(), :return_to_open}, false},
-        {"withdraw: T is not the owner", t, {branch(), :return_to_open}, false},
+        {"withdraw: owner A", a, {branch(), :withdraw}, true},
+        {"withdraw: another agent", other_agent, {branch(), :withdraw}, false},
+        {"withdraw: R", r, {branch(), :withdraw}, false},
+        {"withdraw: T is not the owner", t, {branch(), :withdraw}, false},
         {"abandon: owner A", a, {branch(), :abandon}, true},
         {"abandon: another agent", other_agent, {branch(), :abandon}, false},
         {"abandon: T may abandon any branch", t, {branch(), :abandon}, true},
@@ -306,7 +306,10 @@ defmodule Steward.Authz.OperationMatrixTest do
       :reject,
       :lose_snapshot,
       :close,
-      :heartbeat_touch
+      :heartbeat_touch,
+      :return_to_open,
+      :expire_ttl,
+      :reject_blocked
     ]
 
     test "no user actor, however privileged, can run them" do

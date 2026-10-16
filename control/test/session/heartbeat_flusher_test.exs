@@ -91,7 +91,7 @@ defmodule Steward.Coordinator.HeartbeatFlusherTest do
     assert after_flush.lock_version == proposed.lock_version
 
     # And the process's next transition is not refused as stale.
-    assert {:ok, %{state: :open}} = BranchProcess.transition(ctx.org.id, b.id, :return_to_open)
+    assert {:ok, %{state: :open}} = BranchProcess.transition(ctx.org.id, b.id, :withdraw)
   end
 
   test "heartbeats that are not about a running branch write nothing", ctx do

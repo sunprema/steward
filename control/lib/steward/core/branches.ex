@@ -25,7 +25,8 @@ defmodule Steward.Core.Branches do
       QueueEntry,
       CounterDelta,
       Counter,
-      IdempotencyKey
+      IdempotencyKey,
+      Notifier
     ]
 
   use Ash.Domain
