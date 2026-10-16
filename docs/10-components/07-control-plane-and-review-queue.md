@@ -94,7 +94,7 @@ flowchart TB
 | Namespace | Contains | Depends on |
 |---|---|---|
 | `Steward.Core` | The Ash domains `Steward.Targets` (targets, settings, memberships, impact queries), `Steward.Branches` (branches, changesets, verdicts, merges, reverts, create intents, idempotency keys, queue entries, counters), `Steward.Policies` (policies, versions, tests; doc 06), `Steward.Reviews` (reviews, review features, grants), `Steward.Audit` (events, audit log); their resources, actions, state machines, policies and changes; the `Repo` | — |
-| `Steward.Coordinator` | Registry, supervisors, `Branch` GenServer, `BootSweeper`, `HeartbeatFlusher`, the `Steward.Lifecycle` Spark DSL, the Reactors (`CreateBranch`, `Propose`, `Merge`, `Revert`, `Abandon`), data-plane gRPC clients | `Steward.Core` |
+| `Steward.Coordinator` | Registry, supervisors, `Branch` GenServer, `BootSweeper`, `HeartbeatFlusher`, the `Steward.Coordinator.Lifecycle` Spark DSL, the Reactors (`CreateBranch`, `Propose`, `Merge`, `Revert`, `Abandon`), data-plane gRPC clients | `Steward.Core` |
 | `Steward.Jobs` | AshOban configuration: every trigger and scheduled action, the cron config | `Steward.Core`, `Steward.Coordinator` |
 | `StewardWeb` | Phoenix router, REST controllers (one Ash action per endpoint), gRPC services, LiveView with AshPhoenix forms, PubSub, Presence | all three |
 
@@ -139,11 +139,11 @@ The lifecycle flows are specified in doc 13 §6; each subsection below says only
 
 `CreateBranch`'s checkpoint is `Branch.commit_create` (tx 2 of §5.1); `Propose`'s is `Changeset.record_verdict` (§5.2); `Revert`'s is the revert branch's `commit_create`, after which it runs `Propose` as a sub-reactor; `Abandon`'s is `Branch.abandon`, with every data-plane step after it. Reactor inputs are ids and the actor, never loaded records, so a reactor restarted by the GenServer re-reads state through actions.
 
-**Heartbeat matrix as a Spark DSL.** The GenServer-per-branch coordinator is unchanged as a process (§4) and calls Ash actions for every transition it drives. Its reconciliation matrix (doc 13 §6.8) is declared, not hand-coded, with a small Spark extension `Steward.Lifecycle` whose one section lists cells; the extension's transformer compiles the cells to `Heartbeat.decide/3` and its verifier fails compilation unless all 40 `(believed, authoritative)` pairs are covered exactly once. The same declaration is the input to the matrix test in §10, so the doc table, the dispatch function, and the test cannot drift from one another.
+**Heartbeat matrix as a Spark DSL.** The GenServer-per-branch coordinator is unchanged as a process (§4) and calls Ash actions for every transition it drives. Its reconciliation matrix (doc 13 §6.8) is declared, not hand-coded, with a small Spark extension `Steward.Lifecycle` whose one section lists cells; the extension's transformer compiles the cells to `Heartbeat.decide/3` and its verifier fails compilation unless all 40 `(believed, authoritative)` pairs are covered exactly once. The same declaration is the input to the matrix test in §10, so the doc table, the dispatch function, and the test cannot drift from one another. As built (E2): the module is `Steward.Coordinator.Lifecycle` (the `boundary` library requires a boundary's modules to share its name prefix, as with `Steward.Core.Targets`); the coverage check is a Spark *transformer* rather than a verifier, because Spark reports a failing verifier as a compiler warning while a failing transformer raises; `decide/3` takes a `merge_progress` summary (`advancing`, `complete`, `compensation_persisted`) and `:renew_lease` / `:advance_merged` are declared on the cell but applied only when it says so; and the reply is `{%{authoritative, freeze}, actions}`, with `freeze` true exactly when the branch is `proposed` or `merging`. The process keeps `last_heartbeat_at` in memory; `HeartbeatFlusher` is E3, and the three merge actions are executed through `Steward.Coordinator.HeartbeatActions`, whose merge-side implementations arrive with E6.
 
 ```elixir
 defmodule Steward.Coordinator.HeartbeatMatrix do
-  use Steward.Lifecycle
+  use Steward.Coordinator.Lifecycle
 
   heartbeat do
     cell believed: :open,     authoritative: :open,     reply: :open,     actions: []
@@ -153,7 +153,7 @@ defmodule Steward.Coordinator.HeartbeatMatrix do
     cell believed: :merging,  authoritative: :open,     reply: :open,     actions: [:alert]
     cell believed: :done,     authoritative: :merged,   reply: :merged,   actions: []
     cell believed: :dead,     authoritative: :unknown,  reply: :unknown,  actions: []            # data plane GCs
-    # ... 33 more; the verifier rejects a missing or duplicate pair
+    # ... 33 more; compilation rejects a missing or duplicate pair
   end
 end
 ```

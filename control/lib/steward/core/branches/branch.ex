@@ -182,6 +182,13 @@ defmodule Steward.Core.Branches.Branch do
   actions do
     defaults [:read]
 
+    # Every branch the coordinator keeps a process for (doc 07 §4: BootSweeper
+    # streams this). Terminal branches have none.
+    read :non_terminal do
+      pagination keyset?: true, required?: false
+      filter expr(state in [:open, :proposed, :merging])
+    end
+
     create :create do
       primary? true
 
@@ -204,12 +211,14 @@ defmodule Steward.Core.Branches.Branch do
     end
 
     update :propose do
+      change optimistic_lock(:lock_version)
       accept []
       change transition_state(:proposed)
       change set_attribute(:proposed_at, &DateTime.utc_now/0)
     end
 
     update :return_to_open do
+      change optimistic_lock(:lock_version)
       accept [:reason]
       require_atomic? false
       change transition_state(:open)
@@ -222,6 +231,7 @@ defmodule Steward.Core.Branches.Branch do
     end
 
     update :start_merge do
+      change optimistic_lock(:lock_version)
       accept [:reason]
       require_atomic? false
       argument :merge_id, :uuid, allow_nil?: false
@@ -234,6 +244,7 @@ defmodule Steward.Core.Branches.Branch do
     end
 
     update :reject do
+      change optimistic_lock(:lock_version)
       accept [:reason, :terminal_by_principal_id, :terminal_by_job]
       require_atomic? false
       change transition_state(:rejected)
@@ -246,6 +257,7 @@ defmodule Steward.Core.Branches.Branch do
     end
 
     update :abandon do
+      change optimistic_lock(:lock_version)
       accept [:reason, :terminal_by_principal_id, :terminal_by_job]
       require_atomic? false
       change transition_state(:abandoned)
@@ -258,6 +270,7 @@ defmodule Steward.Core.Branches.Branch do
     end
 
     update :lose_snapshot do
+      change optimistic_lock(:lock_version)
       accept [:reason, :terminal_by_job]
       require_atomic? false
       change transition_state(:abandoned)
@@ -270,6 +283,7 @@ defmodule Steward.Core.Branches.Branch do
     end
 
     update :complete_merge do
+      change optimistic_lock(:lock_version)
       accept [:terminal_by_job]
       require_atomic? false
       argument :merge_id, :uuid, allow_nil?: false
@@ -284,11 +298,13 @@ defmodule Steward.Core.Branches.Branch do
     end
 
     update :fail_merge do
+      change optimistic_lock(:lock_version)
       accept [:reason]
       change transition_state(:proposed)
     end
 
     update :close do
+      change optimistic_lock(:lock_version)
       accept [:overlay_released_at, :terminal_by_job]
       require_atomic? false
       change transition_state(:closed)

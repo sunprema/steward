@@ -34,3 +34,7 @@ config :phoenix_live_view,
 # Sort query params output of verified routes for robust url comparisons
 config :phoenix,
   sort_verified_routes_query_params: true
+
+# Tests start branch processes explicitly; a boot sweep at app start would read
+# the database outside any sandbox checkout.
+config :steward, Steward.Coordinator, boot_sweep: false
