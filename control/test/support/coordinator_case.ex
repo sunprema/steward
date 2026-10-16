@@ -1,7 +1,7 @@
 defmodule Steward.CoordinatorCase do
   @moduledoc """
   Setup for tests that run branch processes: a shared sandbox (the processes
-  query from their own pids), every process stopped after the test, and a
+  query from their own pids), every branch process and data-plane session stopped after the test, and a
   `heartbeat_actions` module that records what the matrix asked for instead of
   doing it (`Steward.CoordinatorCase.RecordingActions`, messages `{:action,
   action, ctx}` to the test process).
@@ -66,6 +66,11 @@ defmodule Steward.CoordinatorCase do
   end
 
   def stop_all do
+    # Sessions are keyed by data-plane id and outlive streams; a test must not inherit one.
+    for {_, pid, _, _} <- DynamicSupervisor.which_children(Steward.Coordinator.Plane.sessions()) do
+      DynamicSupervisor.terminate_child(Steward.Coordinator.Plane.sessions(), pid)
+    end
+
     for {_id, pid, _org} <-
           Registry.select(Steward.Coordinator.Registry, [
             {{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}

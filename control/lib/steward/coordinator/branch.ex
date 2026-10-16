@@ -23,15 +23,17 @@ defmodule Steward.Coordinator.Branch do
       stops the process if the branch is terminal or gone. The retries it will
       carry (pending merge instruction, routing adds) arrive with E4/E6.
 
-  `last_heartbeat_at` is recorded in process state only; flushing it in batches
-  (`HeartbeatFlusher`) is E3.
+  `last_heartbeat_at` is kept in process state, and each heartbeat is also
+  recorded for `HeartbeatFlusher`, which writes them in batches (doc 07 §5.3).
+  A heartbeat reporting `base_snapshot_gone` abandons the branch with
+  `snapshot_lost` (doc 13 §6.2 f3).
   """
   use GenServer, restart: :transient
 
   require Logger
 
   alias Steward.Coordinator
-  alias Steward.Coordinator.{HeartbeatActions, HeartbeatMatrix}
+  alias Steward.Coordinator.{HeartbeatActions, HeartbeatFlusher, HeartbeatMatrix}
   alias Steward.Core.Authz.System
   alias Steward.Core.Branches.Branch, as: BranchRecord
 
@@ -174,7 +176,11 @@ defmodule Steward.Coordinator.Branch do
 
   def handle_call({:heartbeat, hb}, _from, state) do
     {reply, state} = reconcile(hb, state)
-    {:reply, reply, state}
+
+    # A heartbeat can end the branch (`snapshot_lost`); a terminal branch has no process.
+    if state.record.state in @terminal,
+      do: {:stop, :normal, reply, state},
+      else: {:reply, reply, state}
   end
 
   def handle_call({:transition, action, params, opts}, _from, state) do
@@ -216,6 +222,7 @@ defmodule Steward.Coordinator.Branch do
   # --- heartbeat -------------------------------------------------------------
 
   defp reconcile(%{overlay_id: overlay_id} = hb, state) do
+    state = maybe_lose_snapshot(hb, state)
     record = state.record
 
     # Lookup is by both ids: a different overlay id is `unknown`, which is how a
@@ -243,12 +250,58 @@ defmodule Steward.Coordinator.Branch do
       |> Map.put(:stale, state.stale)
       |> Map.put(:actions, Map.new(results))
 
+    record_for_flush(hb, state, authoritative)
+
     {reply,
      %{
        state
        | last_heartbeat_at: DateTime.utc_now(),
          last_progress: if(hb[:merge_progress], do: hb.merge_progress, else: state.last_progress)
      }}
+  end
+
+  # Doc 13 §6.2 f3: the data plane reports the base snapshot gone; the branch is
+  # abandoned with `snapshot_lost` from any non-terminal state, unless it is
+  # `merging` with the compensation already persisted, when the merge is
+  # committed to and runs to completion (§6.5 f7).
+  defp maybe_lose_snapshot(%{base_snapshot_gone: true, overlay_id: overlay_id} = hb, state) do
+    record = state.record
+
+    committed? =
+      record.state == :merging and get_in(hb, [:merge_progress, :compensation_persisted]) == true
+
+    ours? = to_string(record.overlay_id) == to_string(overlay_id)
+
+    if ours? and record.state in [:open, :proposed, :merging] and not committed? do
+      case run_transition(
+             state,
+             :lose_snapshot,
+             %{reason: :snapshot_lost, terminal_by_job: "heartbeat"},
+             []
+           ) do
+        {:ok, updated} -> %{state | record: updated, stale: false}
+        {:error, :stale_transition} -> refresh_cache(state)
+        {:error, _} -> state
+      end
+    else
+      state
+    end
+  end
+
+  defp maybe_lose_snapshot(_hb, state), do: state
+
+  # Only a heartbeat for this overlay, of a branch still running, is worth a write.
+  defp record_for_flush(hb, state, authoritative) do
+    if authoritative in [:open, :proposed, :merging] do
+      HeartbeatFlusher.record(%{
+        branch_id: state.branch_id,
+        org_id: state.org_id,
+        at: DateTime.utc_now(),
+        rows: hb[:overlay_rows],
+        bytes: hb[:overlay_bytes],
+        evidence_gap: hb[:evidence_gap]
+      })
+    end
   end
 
   defp progress(nil, _last), do: nil

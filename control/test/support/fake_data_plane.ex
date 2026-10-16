@@ -19,9 +19,11 @@ defmodule Steward.FakeDataPlane do
       the test (or the code under test, standing in for the Session host)
       delivers downstream messages with `deliver/2`. This is what E2 and the
       coordinator's tests use.
-    * `{:grpc, "host:port"}`: dials a real `Session.Connect` stream, as the
-      engine does, and is driven by whatever Session server answers. This is
-      what E3's integration tests use.
+    * `{:grpc, "host:port"}` or `{:grpc, "host:port", opts}`: dials a real
+      `Session.Connect` stream, as the engine does, and is driven by whatever
+      Session server answers; E3's tests use it against the real host. It sends
+      its id in `x-steward-data-plane-id` (the development identity); `opts`:
+      `identity_header:` to claim another id, `cred:` a `GRPC.Credential` for mTLS.
 
   ## Scripting failures
 
@@ -86,7 +88,7 @@ defmodule Steward.FakeDataPlane do
 
   @doc """
   Options: `:data_plane_id`, `:owner` (default the caller), `:transport`
-  (`:direct` | `{:grpc, address}`), `:version`, `:merge_rows`.
+  (`:direct` | `{:grpc, address}` | `{:grpc, address, opts}`), `:version`, `:merge_rows`.
   """
   def start_link(opts \\ []) do
     opts = Keyword.put_new(opts, :owner, self())
@@ -134,6 +136,13 @@ defmodule Steward.FakeDataPlane do
   @doc "Moves a stalled merge's confirmed-row count forward without finishing it."
   def advance_merge(dp, branch_id, rows),
     do: GenServer.call(dp, {:advance_merge, branch_id, rows})
+
+  @doc """
+  Sends an arbitrary upstream message body (`{:audit_event, %DataPlaneAuditEvent{}}`,
+  an oversized `{:changeset_report, _}`, ...), as the real engine might. For tests
+  of how the control plane treats what it did not expect.
+  """
+  def inject(dp, {tag, body}), do: GenServer.call(dp, {:inject, tag, body})
 
   def overlay(dp, branch_id), do: GenServer.call(dp, {:overlay, branch_id})
   def overlays(dp), do: GenServer.call(dp, :overlays)
@@ -297,6 +306,7 @@ defmodule Steward.FakeDataPlane do
     end
   end
 
+  def handle_call({:inject, tag, body}, _from, s), do: {:reply, :ok, emit(s, {tag, body})}
   def handle_call(:disconnect, _from, s), do: {:reply, :ok, close_stream(s)}
   def handle_call(:reconnect, _from, s), do: {:reply, :ok, s |> close_stream() |> open_stream()}
 
@@ -321,8 +331,18 @@ defmodule Steward.FakeDataPlane do
 
   defp open_stream(%{transport: :direct} = s), do: %{s | connected: true}
 
-  defp open_stream(%{transport: {:grpc, address}} = s) do
-    with {:ok, channel} <- GRPC.Stub.connect(address, adapter: GRPC.Client.Adapters.Mint) do
+  defp open_stream(%{transport: {:grpc, address}} = s),
+    do: open_stream(%{s | transport: {:grpc, address, []}})
+
+  defp open_stream(%{transport: {:grpc, address, opts}} = s) do
+    # Identity: the dev/test listener reads it from this header; with mTLS it is the
+    # client certificate in `cred`. `identity_header:` lets a test claim another id.
+    headers = [{"x-steward-data-plane-id", Keyword.get(opts, :identity_header, s.id)}]
+
+    connect_opts =
+      [adapter: GRPC.Client.Adapters.Mint, headers: headers] ++ Keyword.take(opts, [:cred])
+
+    with {:ok, channel} <- GRPC.Stub.connect(address, connect_opts) do
       stream = V1.Session.Stub.connect(channel)
       parent = self()
 
@@ -345,12 +365,15 @@ defmodule Steward.FakeDataPlane do
     end
   end
 
-  defp close_stream(%{transport: {:grpc, _}, channel: channel} = s) when not is_nil(channel) do
+  defp close_stream(%{transport: {:grpc, _, _}, channel: channel} = s) when not is_nil(channel) do
     if s.reader, do: Process.unlink(s.reader)
     if s.stream, do: GRPC.Stub.end_stream(s.stream)
     GRPC.Stub.disconnect(channel)
     %{s | channel: nil, stream: nil, reader: nil, connected: false}
   end
+
+  defp close_stream(%{transport: {:grpc, a}} = s),
+    do: close_stream(%{s | transport: {:grpc, a, []}})
 
   defp close_stream(s), do: %{s | connected: false}
 

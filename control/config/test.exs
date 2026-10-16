@@ -36,5 +36,9 @@ config :phoenix,
   sort_verified_routes_query_params: true
 
 # Tests start branch processes explicitly; a boot sweep at app start would read
-# the database outside any sandbox checkout.
-config :steward, Steward.Coordinator, boot_sweep: false
+# the database outside any sandbox checkout, and the heartbeat flusher writes only
+# when a test calls `HeartbeatFlusher.flush/0`.
+config :steward, Steward.Coordinator, boot_sweep: false, heartbeat_flush_ms: :infinity
+
+# Tests start their own Session listener on a free port.
+config :steward, StewardWeb.Plane, start_server: false, identity: :header

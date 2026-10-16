@@ -22,6 +22,11 @@ config :steward,
 
 config :steward, Steward.Repo, types: Steward.PostgrexTypes
 
+# The Session gRPC listener (doc 07 §3.1). `identity: :header` trusts the
+# `x-steward-data-plane-id` header and is for local development only; runtime.exs
+# requires TLS and `:cert` in production.
+config :steward, StewardWeb.Plane, start_server: true, port: 50051, identity: :header
+
 # Configure the endpoint
 config :steward, StewardWeb.Endpoint,
   url: [host: "localhost"],

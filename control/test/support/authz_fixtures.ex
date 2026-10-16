@@ -35,7 +35,7 @@ defmodule Steward.AuthzFixtures do
     |> Ash.create!()
   end
 
-  def target(org, creator) do
+  def target(org, creator, opts \\ []) do
     slug = "target-#{System.unique_integer([:positive])}"
 
     Targets.Target
@@ -46,11 +46,34 @@ defmodule Steward.AuthzFixtures do
         name: slug,
         kind: :postgres,
         credential_ref: "env://SYNTHETIC",
-        created_by: creator.id
+        created_by: creator.id,
+        data_plane_id: opts[:data_plane_id]
       },
       tenant: org.id,
       authorize?: false
     )
+    |> Ash.create!()
+  end
+
+  def data_plane(org, opts \\ []) do
+    Targets.DataPlane
+    |> Ash.Changeset.for_create(
+      :create,
+      %{
+        region: "synthetic-1",
+        chart_version: "0.0.0",
+        cert_serial:
+          Keyword.get(opts, :cert_serial, "serial-#{System.unique_integer([:positive])}"),
+        enrolled_at: DateTime.utc_now()
+      },
+      tenant: org.id,
+      authorize?: false
+    )
+    |> then(fn changeset ->
+      if id = opts[:id],
+        do: Ash.Changeset.force_change_attribute(changeset, :id, id),
+        else: changeset
+    end)
     |> Ash.create!()
   end
 
