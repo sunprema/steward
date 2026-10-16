@@ -60,6 +60,10 @@ mix steward.contracts.gen --check  # fail if the checked-in stubs are stale
 
 `steward.contracts.gen` needs `python3 -m grpc_tools.protoc` (`pip install grpcio-tools`; set `STEWARD_PYTHON` to pick the interpreter) and `protoc-gen-elixir` (`mix escript.install hex protobuf`).
 
+## Branch coordinator
+
+`Steward.Coordinator` (E2) runs one process per non-terminal branch, found through `Steward.Coordinator.Registry` and supervised by a `PartitionSupervisor`; process state is a cache of the row. Transitions go through `Steward.Coordinator.Branch.transition/5` (an Ash action guarded by `lock_version`); heartbeats through `Steward.Coordinator.Heartbeat.handle/2`, decided by the declared matrix in `Steward.Coordinator.HeartbeatMatrix`. Tests that start processes use `Steward.CoordinatorCase`; `boot_sweep` is off in `config/test.exs`.
+
 ## Fake data plane (test support)
 
 `test/support/fake_data_plane.ex` (`Steward.FakeDataPlane`, E13) stands in for a customer's data plane so the control plane never waits on Rust. It speaks the generated `steward.plane.v1` messages, either in-process (`transport: :direct`, for coordinator and reactor tests) or over a real `Session.Connect` stream (`transport: {:grpc, address}`, for E3). Failures are scripted per instruction kind; the moduledoc maps each behaviour to the doc 13 §6 row it reproduces, and `test/fake_data_plane/failure_rows_test.exs` has one scenario per row. `Steward.FakeDataPlane.Matrix` is the data plane's half of the doc 13 §6.8 reconciliation table.

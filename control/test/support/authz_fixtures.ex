@@ -95,14 +95,14 @@ defmodule Steward.AuthzFixtures do
 
   def system(role, org), do: Authz.System.new(role, org.id)
 
-  def branch(org, target, owner) do
+  def branch(org, target, owner, opts \\ []) do
     Branches.Branch
     |> Ash.Changeset.for_create(
       :create,
       %{
         target_id: target.id,
         principal_id: owner.id,
-        overlay_id: uuid(),
+        overlay_id: Keyword.get(opts, :overlay_id, uuid()),
         base_snapshot_ref: "synthetic-snapshot",
         base_snapshot_fidelity: :TRUE_SNAPSHOT,
         base_snapshot_at: DateTime.utc_now(),
@@ -112,6 +112,11 @@ defmodule Steward.AuthzFixtures do
       tenant: org.id,
       authorize?: false
     )
+    |> then(fn changeset ->
+      if id = opts[:id],
+        do: Ash.Changeset.force_change_attribute(changeset, :id, id),
+        else: changeset
+    end)
     |> Ash.create!()
   end
 
