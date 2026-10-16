@@ -41,6 +41,9 @@ defmodule StewardWeb.Plane.ServerMtlsTest do
         )
     ]
 
+    # The shared plaintext listener holds the Ranch listener name; swap it out for this module.
+    Steward.SessionHarness.stop_shared()
+    on_exit(&Steward.SessionHarness.start_shared/0)
     port = free_port()
     previous = Application.get_env(:steward, StewardWeb.Plane, [])
     Application.put_env(:steward, StewardWeb.Plane, Keyword.put(previous, :identity, :cert))
@@ -63,8 +66,9 @@ defmodule StewardWeb.Plane.ServerMtlsTest do
     %{org: org()}
   end
 
-  # RSA: the default EC test keys are not acceptable to the TLS 1.3 handshake here.
-  @rsa [key: {:rsa, 2048, 17}]
+  # RSA, 1024 bits: test-only keys (generation time dominates this module otherwise); the
+  # default EC test keys are not acceptable to the TLS 1.3 handshake here.
+  @rsa [key: {:rsa, 1024, 17}]
 
   # A server chain and a client chain whose peer certificate carries `san`.
   defp pair(san), do: pair_with([{:dNSName, String.to_charlist(san)}])

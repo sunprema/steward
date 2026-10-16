@@ -15,16 +15,7 @@ defmodule StewardWeb.Plane.ServerTest do
   alias Steward.Plane.V1
 
   setup_all do
-    port = free_port()
-
-    start_supervised!(
-      Supervisor.child_spec(
-        {GRPC.Server.Supervisor, StewardWeb.Plane.supervisor_opts(port: port)},
-        shutdown: 500
-      )
-    )
-
-    %{address: "127.0.0.1:#{port}"}
+    Steward.SessionHarness.start_listener()
   end
 
   setup %{address: address} do
@@ -33,13 +24,6 @@ defmodule StewardWeb.Plane.ServerTest do
     dp = data_plane(org)
     target = target(org, principal(org, :human), data_plane_id: dp.id)
     %{org: org, owner: owner, dp: dp, target: target, address: address}
-  end
-
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, [])
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
   end
 
   defp start_fake(ctx, opts \\ []) do

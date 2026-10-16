@@ -55,7 +55,7 @@ defmodule Steward.Coordinator do
       HeartbeatFlusher
     ]
 
-  alias Steward.Coordinator.{Branch, BootSweeper, HeartbeatFlusher, Plane}
+  alias Steward.Coordinator.{Branch, BootSweeper, HeartbeatFlusher, Plane, Reports}
 
   @registry Steward.Coordinator.Registry
   @supervisors Steward.Coordinator.BranchSupervisors
@@ -83,7 +83,9 @@ defmodule Steward.Coordinator do
         {Registry, keys: :unique, name: @registry},
         {PartitionSupervisor, child_spec: DynamicSupervisor, name: @supervisors},
         HeartbeatFlusher,
-        Plane
+        Plane,
+        Reports,
+        {Task.Supervisor, name: Steward.Coordinator.FlowTasks}
       ] ++ if(boot_sweep?, do: [BootSweeper], else: [])
 
     Supervisor.start_link(children, strategy: :rest_for_one, name: Steward.Coordinator.Supervisor)

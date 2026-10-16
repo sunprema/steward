@@ -230,7 +230,14 @@ defmodule Steward.Coordinator.Plane.UpstreamTest do
   end
 
   describe "the default handlers" do
-    test "defer visibly until E4/E6 give them somewhere to go", ctx do
+    test "a changeset report goes to whoever waits for it (the Propose reactor)", ctx do
+      report = %V1.ChangesetReport{changeset_id: Ecto.UUID.generate(), branch_id: ctx.branch.id}
+      Upstream.handle(ctx.up, message(ctx, {:changeset_report, report}))
+
+      assert {:ok, ^report} = Steward.Coordinator.Reports.await(report.changeset_id, 100)
+    end
+
+    test "a merge outcome has no consumer until E6, and says so in telemetry", ctx do
       handler = {__MODULE__, make_ref()}
       parent = self()
 
@@ -243,13 +250,7 @@ defmodule Steward.Coordinator.Plane.UpstreamTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      Upstream.handle(
-        ctx.up,
-        message(ctx, {:changeset_report, %V1.ChangesetReport{changeset_id: "c1"}})
-      )
-
       Upstream.handle(ctx.up, message(ctx, {:merge_outcome, %V1.MergeOutcome{merge_id: "m1"}}))
-      assert_receive {:deferred, :changeset_report}
       assert_receive {:deferred, :merge_outcome}
     end
   end

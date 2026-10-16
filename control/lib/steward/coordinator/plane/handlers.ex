@@ -4,10 +4,11 @@ defmodule Steward.Coordinator.Plane.Handlers do
   decoded them. The session host owns the stream; what to *do* with a
   `ChangesetReport` or a `MergeOutcome` belongs to the flows that asked for it:
   the `Propose` reactor and policy engine (E4, E5) and the `Merge` reactor (E6).
-  Until they exist the default implementation counts the message in telemetry
+  A `ChangesetReport` goes to `Steward.Coordinator.Reports`, where the `Propose`
+  reactor (E4) waits for it. A `MergeOutcome` has no consumer until the `Merge`
+  reactor (E6): the default counts it in telemetry
   (`[:steward, :plane, :report_deferred]`) and drops it, which is safe because the
-  data plane re-reports on the next heartbeat and a recompute is idempotent
-  (doc 13 §6.3 f3–f4, §6.5 f8–f9).
+  data plane re-reports on the next heartbeat (doc 13 §6.5 f8–f9).
 
   Replace with `config :steward, Steward.Coordinator, plane_handlers: MyModule`.
   """
@@ -19,8 +20,8 @@ defmodule Steward.Coordinator.Plane.Handlers do
   @behaviour __MODULE__
 
   @impl true
-  def changeset_report(_org_id, data_plane_id, report),
-    do: deferred(:changeset_report, data_plane_id, report.changeset_id)
+  def changeset_report(_org_id, _data_plane_id, report),
+    do: Steward.Coordinator.Reports.deliver(report)
 
   @impl true
   def merge_outcome(_org_id, data_plane_id, outcome),

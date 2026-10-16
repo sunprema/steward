@@ -132,9 +132,20 @@ defmodule Steward.Coordinator.Plane do
         do: Ash.UUIDv7.generate(),
         else: instruction.instruction_id
 
-    {%{instruction | instruction_id: id},
-     Keyword.get(opts, :deadline_ms, deadline_ms(instruction))}
+    deadline =
+      Keyword.get_lazy(opts, :deadline_ms, fn ->
+        configured_deadline() || deadline_ms(instruction)
+      end)
+
+    {%{instruction | instruction_id: id}, deadline}
   end
+
+  # Tests (and only tests) shorten every reply deadline:
+  # `config :steward, Steward.Coordinator, instruction_deadline_ms: 200`.
+  defp configured_deadline,
+    do:
+      Application.get_env(:steward, Steward.Coordinator, [])
+      |> Keyword.get(:instruction_deadline_ms)
 
   defp session!(org_id, data_plane_id) do
     case whereis(data_plane_id) do
