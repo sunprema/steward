@@ -4,8 +4,11 @@ defmodule Steward.Core.Policies.PolicyTest do
   they carry forward (doc 06 §4.3); mirrored as YAML under
   `control/test/policies/<target>/<policy>/<test>.yaml` (doc 06 §5.5).
   """
+  alias Steward.Core.Authz.Checks.{Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Policies,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -49,6 +52,22 @@ defmodule Steward.Core.Policies.PolicyTest do
     identity :unique_name, [:policy_id, :name]
   end
 
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "policy:read", target: {:via, [:policy]}}
+    end
+
+    policy action([:create, :update, :destroy]) do
+      authorize_if {Scope, scope: "policy:write", target: {__MODULE__, :authz_target_id}}
+    end
+
+    policy action([:record_run]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+      authorize_if {Scope, scope: "policy:read", target: {__MODULE__, :authz_target_id}}
+    end
+  end
+
   actions do
     defaults [:read, :destroy]
 
@@ -67,4 +86,8 @@ defmodule Steward.Core.Policies.PolicyTest do
       change set_attribute(:last_run_at, &DateTime.utc_now/0)
     end
   end
+
+  @doc false
+  def authz_target_id(subject),
+    do: Steward.Core.Authz.Subject.target_via(subject, :policy_id, Steward.Core.Policies.Policy)
 end

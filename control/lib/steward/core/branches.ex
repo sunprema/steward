@@ -6,7 +6,13 @@ defmodule Steward.Core.Branches do
   merge's own metadata mirror (doc 18 §5 decision).
   """
   use Boundary,
-    deps: [Steward.Core.Types, Steward.Core.Targets, Steward.Core.Policies, Steward.Core.Audit],
+    deps: [
+      Steward.Core.Types,
+      Steward.Core.Authz,
+      Steward.Core.Targets,
+      Steward.Core.Policies,
+      Steward.Core.Audit
+    ],
     exports: [
       CreateIntent,
       Branch,

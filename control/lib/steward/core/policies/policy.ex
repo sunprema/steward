@@ -1,7 +1,10 @@
 defmodule Steward.Core.Policies.Policy do
   @moduledoc "Doc 12 §2.2 `policies` — one row per policy identity; versions carry the content."
+  alias Steward.Core.Authz.Checks.{ActsAs, Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Policies,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -60,6 +63,28 @@ defmodule Steward.Core.Policies.Policy do
 
   identities do
     identity :unique_slug, [:target_id, :slug]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "policy:read"}
+    end
+
+    policy action([:create]) do
+      forbid_unless {ActsAs, attribute: :created_by}
+      authorize_if {Scope, scope: "policy:write"}
+    end
+
+    policy action([:set_active_version]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+      authorize_if {Scope, scope: "policy:admin"}
+    end
+
+    policy action([:archive]) do
+      authorize_if {SystemActor, roles: [:jobs, :coordinator]}
+      authorize_if {Scope, scope: "policy:admin"}
+    end
   end
 
   actions do

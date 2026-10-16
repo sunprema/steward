@@ -7,8 +7,11 @@ defmodule Steward.Core.Targets.TargetMembership do
   Ash-backed join resource in this schema is keyed. The "agent may not hold
   `policy_admin`" trigger (doc 06 §8) is a hand-written migration fragment.
   """
+  alias Steward.Core.Authz.Checks.{ActsAs, Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Targets,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -49,6 +52,24 @@ defmodule Steward.Core.Targets.TargetMembership do
 
   identities do
     identity :unique_grant, [:target_id, :principal_id, :capability]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "target:admin"}
+      authorize_if {ScopedRead, or_principal: :principal_id}
+    end
+
+    # Granting a capability needs `target:admin`; `granted_by` is the grantor (doc 15 §3.2).
+    policy action([:create]) do
+      forbid_unless {ActsAs, attribute: :granted_by}
+      authorize_if {Scope, scope: "target:admin"}
+    end
+
+    policy action([:destroy]) do
+      authorize_if {Scope, scope: "target:admin"}
+    end
   end
 
   actions do

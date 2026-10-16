@@ -4,8 +4,11 @@ defmodule Steward.Core.Branches.CompensationRecordMeta do
   index, written from heartbeat `compensation_status`; never segments,
   keys, or images. 1:1 with `Merge`, keyed by `merge_id`.
   """
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -61,6 +64,17 @@ defmodule Steward.Core.Branches.CompensationRecordMeta do
 
     belongs_to :consumed_by_branch, Steward.Core.Branches.Branch do
       attribute_writable? true
+    end
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "changeset:read"}
+    end
+
+    policy action([:create, :update]) do
+      authorize_if {SystemActor, roles: [:coordinator, :session]}
     end
   end
 

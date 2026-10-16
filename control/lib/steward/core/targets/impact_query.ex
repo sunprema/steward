@@ -1,7 +1,10 @@
 defmodule Steward.Core.Targets.ImpactQuery do
   @moduledoc "Doc 12 §2.3 `impact_queries`; metrics are named `<name>.<column>` (doc 05 §5.3)."
+  alias Steward.Core.Authz.Checks.{Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Targets,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -42,6 +45,17 @@ defmodule Steward.Core.Targets.ImpactQuery do
 
   identities do
     identity :unique_name, [:target_id, :name]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "policy:read"}
+    end
+
+    policy action([:create, :update, :destroy]) do
+      authorize_if {Scope, scope: "target:admin"}
+    end
   end
 
   actions do

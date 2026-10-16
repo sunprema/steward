@@ -4,8 +4,11 @@ defmodule Steward.Core.Branches.Revert do
   revert per merge" and "at most one merged revert per merge" (doc 02 §3,
   doc 13 invariant 14).
   """
+  alias Steward.Core.Authz.Checks.{ActsAs, Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -61,6 +64,25 @@ defmodule Steward.Core.Branches.Revert do
     identity :unique_merged_per_merge, [:merge_id], where: expr(outcome == "merged")
   end
 
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "changeset:read"}
+    end
+
+    # Initiating a revert needs `merge:revert` on the merge's own target (doc 13 §6.6); the
+    # target is read from the merge, not trusted from the request.
+    policy action([:create]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+      forbid_unless {ActsAs, attribute: :requested_by}
+      authorize_if {Scope, scope: "merge:revert", target: {__MODULE__, :authz_target_id}}
+    end
+
+    policy action([:record_outcome]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+    end
+  end
+
   actions do
     defaults [:read]
 
@@ -73,4 +95,8 @@ defmodule Steward.Core.Branches.Revert do
       accept [:outcome]
     end
   end
+
+  @doc false
+  def authz_target_id(subject),
+    do: Steward.Core.Authz.Subject.target_via(subject, :merge_id, Steward.Core.Branches.Merge)
 end

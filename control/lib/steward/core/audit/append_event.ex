@@ -50,6 +50,7 @@ defmodule Steward.Core.Audit.AppendEvent do
     end)
   end
 
-  defp actor_principal_id(%{id: id}), do: id
-  defp actor_principal_id(_), do: nil
+  # An API key's own id is not a principal; attribute the event to the
+  # principal the actor acts as (nil for system actors).
+  defp actor_principal_id(actor), do: Steward.Core.Authz.principal_id(actor)
 end

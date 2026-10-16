@@ -4,8 +4,11 @@ defmodule Steward.Core.Reviews.ReviewFeature do
   (doc 06 §5.6) from data already in the control plane; read only by the
   M2+ suggestion job. No row data. 1:1 with `Review`, keyed by `review_id`.
   """
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Reviews,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -105,6 +108,17 @@ defmodule Steward.Core.Reviews.ReviewFeature do
     belongs_to :branch_principal, Steward.Core.Targets.Principal do
       allow_nil? false
       attribute_writable? true
+    end
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "policy:read"}
+    end
+
+    policy action([:create]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
     end
   end
 

@@ -4,8 +4,11 @@ defmodule Steward.Core.Branches.QueueEntry do
   from `changesets` + `verdicts` + `branches` (doc 07 §5.5). No
   `AppendEvent` change (doc 12 §0).
   """
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -63,6 +66,21 @@ defmodule Steward.Core.Branches.QueueEntry do
 
   identities do
     identity :unique_changeset, [:changeset_id]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "review:read"}
+    end
+
+    policy action([:upsert]) do
+      authorize_if {SystemActor, roles: [:coordinator, :jobs]}
+    end
+
+    policy action([:destroy]) do
+      authorize_if {SystemActor, roles: [:coordinator, :jobs]}
+    end
   end
 
   actions do

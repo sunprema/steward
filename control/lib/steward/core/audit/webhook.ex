@@ -6,8 +6,11 @@ defmodule Steward.Core.Audit.Webhook do
   explicit foreign key for it, and declaring one would create a cycle with
   `Steward.Core.Targets` (which itself depends on `Audit` for `AppendEvent`).
   """
+  alias Steward.Core.Authz.Checks.{ActsAs, Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Audit,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -33,6 +36,22 @@ defmodule Steward.Core.Audit.Webhook do
 
     create_timestamp :inserted_at
     update_timestamp :updated_at
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "webhook:admin", target: :org}
+    end
+
+    policy action([:create]) do
+      forbid_unless {ActsAs, attribute: :created_by}
+      authorize_if {Scope, scope: "webhook:admin", target: :org}
+    end
+
+    policy action([:update, :destroy]) do
+      authorize_if {Scope, scope: "webhook:admin", target: :org}
+    end
   end
 
   actions do

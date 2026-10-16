@@ -6,6 +6,7 @@ defmodule Steward.Core.Audit do
   (for `AppendEvent`), so this domain must depend on none of them.
   """
   use Boundary,
+    deps: [Steward.Core.Authz],
     exports: [AppendEvent, AppendOnly, BoundaryJson, Event, AuditLog, Webhook, WebhookDelivery]
 
   use Ash.Domain

@@ -1,7 +1,10 @@
 defmodule Steward.Core.Targets.DataPlane do
   @moduledoc "Doc 12 §2.3 `data_planes` — enrolment (doc 14 §6); `targets.data_plane_id` references it."
+  alias Steward.Core.Authz.Checks.{Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Targets,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -30,6 +33,26 @@ defmodule Steward.Core.Targets.DataPlane do
 
   identities do
     identity :unique_cert_serial, [:cert_serial], all_tenants?: true
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "target:admin", target: :org}
+    end
+
+    policy action([:create]) do
+      authorize_if {Scope, scope: "target:admin", target: :any}
+    end
+
+    policy action([:update]) do
+      authorize_if {SystemActor, roles: [:session]}
+      authorize_if {Scope, scope: "target:admin", target: :any}
+    end
+
+    policy action([:destroy]) do
+      authorize_if {SystemActor, roles: [:jobs]}
+    end
   end
 
   actions do

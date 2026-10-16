@@ -1,7 +1,10 @@
 defmodule Steward.Core.Targets.TargetSettings do
   @moduledoc "Doc 12 §2.3 `target_settings` — 1:1 with `Target`, keyed by `target_id`."
+  alias Steward.Core.Authz.Checks.{Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Targets,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -77,6 +80,27 @@ defmodule Steward.Core.Targets.TargetSettings do
       define_attribute? false
       allow_nil? false
       primary_key? true
+    end
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: :any}
+    end
+
+    policy action([:create]) do
+      authorize_if {SystemActor, roles: [:coordinator, :api]}
+      authorize_if {Scope, scope: "target:admin"}
+    end
+
+    policy action([:update]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+      authorize_if {Scope, scope: "target:admin"}
+    end
+
+    policy action([:destroy]) do
+      authorize_if {SystemActor, roles: [:jobs]}
     end
   end
 

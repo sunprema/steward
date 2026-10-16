@@ -112,6 +112,13 @@ Humans hold **membership capabilities** on `target_memberships`: `reviewer`, `po
 | Webhooks | — | `webhook:admin` | — | — | — | ✓ | HTTPS only (doc 12 §2.2) |
 | Compensation export | — | `target:admin` | — | — | ✓ | — | Grant `compensation:export:<target_id>`; manifest hash audited |
 
+Notes on the matrix as implemented (E1b, doc 07 §8):
+
+- `target_admin` implies `branch:write` (create and abandon any branch) and `audit:read`, per the matrix, but not `branch:propose`: no human membership proposes. On a key, `target:admin` implies `merge:revert` only (doc 10 §3.1).
+- *Register target* is `target:admin` on any target, so the first target of an org cannot be registered through the API by `org_admin` alone (the matrix gives `O` nothing there). The first target and its first `target_admin` membership are created out of band by the installer (doc 14); whether `org_admin` should also register targets is an open question below.
+- *Audit events read*: `events` has no target column, so "target filter honours memberships" is not enforceable yet; `audit:read` (a key, `org_admin`, or any `target_admin`) reads the org's events. A `target_admin` can therefore see events on other targets of the same org until `events` carries `target_id` (doc 12 amendment).
+- A key whose principal is disabled is not checked for that at request time by the policies; revocation is by `revoked_at` (doc 15 §2.1).
+
 ### 3.3 Separation of duties
 
 - **Self-approval is refused** with `self_approval` (doc 07 §5.5), compared on principal id. A service principal that owns a branch cannot approve it even if it also holds `review:decide`.
@@ -285,6 +292,8 @@ Resolving doc 03 §11's open question. Evidence records (doc 12 §8.8) carry `st
 | Is a browser-direct fetch to the data plane acceptable to customers' network policies, or do we need a data-plane-hosted viewer frame (doc 07 §12)? Affects the grant endpoint's exposure | Founding team | Before M0 queue UI |
 | `audit_retention` per org (1–7 years): confirm the range and whether `events` also needs a per-org override | Founding team | Doc 12 amendment |
 | SAML: which customer forces it, and whether to buy (WorkOS-style relay) or build | Founding team | M1 |
+| Should `org_admin` be able to register a target (and so bootstrap the first one through the API), or does it stay installer-only (§3.2 notes)? | Product | Before M0 onboarding flow |
+| Add `target_id` to `events` so `audit:read` can honour memberships (§3.2 notes)? | Control plane lead | Doc 12 amendment |
 | Legal-hold authority: `target_admin` sets it in M0 (§3.2); should clearing require `org_admin` or a second approver? | Product | Doc 10 amendment |
 | Object-store object lock on compensation headers as belt-and-braces (doc 09 §12) and the KMS integration per cloud | Infrastructure lead | Doc 14 |
 | Customer-built adapters (M1+): image-build model as in §8, or a signed plugin registry? | Adapters lead | M1 |

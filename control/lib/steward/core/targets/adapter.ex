@@ -1,7 +1,10 @@
 defmodule Steward.Core.Targets.Adapter do
   @moduledoc "Doc 12 §2.3 `adapters` — one per target (doc 02); the catalog snapshot, never rows."
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Targets,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -38,6 +41,21 @@ defmodule Steward.Core.Targets.Adapter do
 
   identities do
     identity :unique_target, [:target_id]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: :any}
+    end
+
+    policy action([:create, :update]) do
+      authorize_if {SystemActor, roles: [:session, :coordinator]}
+    end
+
+    policy action([:destroy]) do
+      authorize_if {SystemActor, roles: [:jobs]}
+    end
   end
 
   actions do

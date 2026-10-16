@@ -1,7 +1,10 @@
 defmodule Steward.Core.Branches.IdempotencyKey do
   @moduledoc "Doc 12 §2.3 `idempotency_keys`. 24 h TTL (doc 13 §8), purged by `IdempotencyPurge`."
+  alias Steward.Core.Authz.Checks.{SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -34,6 +37,20 @@ defmodule Steward.Core.Branches.IdempotencyKey do
 
   identities do
     identity :unique_key, [:principal_id, :key]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: [:api]}
+    end
+
+    policy action([:create]) do
+      authorize_if {SystemActor, roles: [:api]}
+    end
+
+    policy action([:destroy]) do
+      authorize_if {SystemActor, roles: [:api, :jobs]}
+    end
   end
 
   actions do

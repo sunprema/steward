@@ -1,7 +1,10 @@
 defmodule Steward.Core.Branches.Verdict do
   @moduledoc "Doc 12 §2.2 `verdicts` — exactly one per changeset (doc 13 invariant 4). Append-only."
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -64,6 +67,17 @@ defmodule Steward.Core.Branches.Verdict do
 
   identities do
     identity :unique_changeset, [:changeset_id]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "changeset:read", target: {:via, [:changeset]}}
+    end
+
+    policy action([:create]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+    end
   end
 
   actions do

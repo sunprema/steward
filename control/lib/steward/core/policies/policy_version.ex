@@ -4,8 +4,11 @@ defmodule Steward.Core.Policies.PolicyVersion do
   activation/retirement columns. `AshStateMachine` transitions declared
   literally from doc 06 §5.2's `[*] → draft → active → retired`.
   """
+  alias Steward.Core.Authz.Checks.{ActsAs, Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Policies,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer,
     extensions: [AshStateMachine]
 
@@ -89,6 +92,35 @@ defmodule Steward.Core.Policies.PolicyVersion do
     identity :one_active_per_policy, [:policy_id], where: expr(state == :active)
   end
 
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "policy:read", target: {:via, [:policy]}}
+    end
+
+    # `saved_by` feeds the activation separation rule (doc 15 §3.3), so it may only name the caller.
+    policy action([:create]) do
+      forbid_unless {ActsAs, attribute: :saved_by}
+      authorize_if {Scope, scope: "policy:write", target: {__MODULE__, :authz_target_id}}
+    end
+
+    policy action([:record_static_check, :record_tests_passed]) do
+      authorize_if {SystemActor, roles: [:coordinator, :jobs]}
+      authorize_if {Scope, scope: "policy:write", target: {__MODULE__, :authz_target_id}}
+    end
+
+    # Activation needs `policy:admin` on the target; refusing self-activation
+    # (`policy_activation_refused`) is a domain rule, added with the Policy engine (E5).
+    policy action([:activate]) do
+      authorize_if {Scope, scope: "policy:admin", target: {__MODULE__, :authz_target_id}}
+    end
+
+    policy action([:retire]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+      authorize_if {Scope, scope: "policy:admin", target: {__MODULE__, :authz_target_id}}
+    end
+  end
+
   actions do
     defaults [:read]
 
@@ -159,4 +191,9 @@ defmodule Steward.Core.Policies.PolicyVersion do
   end
 
   def activated_payload(_changeset, record), do: %{policy_version_id: record.id}
+
+  @doc false
+  # The target a version belongs to, through its policy (doc 15 §3.2).
+  def authz_target_id(subject),
+    do: Steward.Core.Authz.Subject.target_via(subject, :policy_id, Steward.Core.Policies.Policy)
 end

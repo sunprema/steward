@@ -5,8 +5,11 @@ defmodule Steward.Core.Audit.Event do
   transaction. Append-only; partitioned by `occurred_at` (hand-written
   migration fragment, doc 12 §0, since Ash has no partitioning concept).
   """
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Audit,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -63,6 +66,19 @@ defmodule Steward.Core.Audit.Event do
     attribute :payload, :map, allow_nil?: false, default: %{}
     attribute :occurred_at, :utc_datetime_usec, allow_nil?: false
     create_timestamp :inserted_at
+  end
+
+  policies do
+    # Audit events: org-level `audit:read` (doc 15 §3.2). Events carry no target column, so
+    # the "target filter honours memberships" refinement is not expressible yet; see the E1b notes.
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "audit:read", target: :org}
+    end
+
+    policy action([:create]) do
+      authorize_if {SystemActor, roles: :any}
+    end
   end
 
   actions do

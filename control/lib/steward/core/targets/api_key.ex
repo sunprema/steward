@@ -3,8 +3,11 @@ defmodule Steward.Core.Targets.ApiKey do
   Doc 12 §2.3 `api_keys`. The secret itself is never stored (doc 07 §8);
   only `secret_sha256`. Pushed to data planes via `RoutingUpsert` (doc 04 §8).
   """
+  alias Steward.Core.Authz.Checks.{OrgAdmin, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Targets,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -44,17 +47,40 @@ defmodule Steward.Core.Targets.ApiKey do
     identity :unique_prefix, [:prefix], all_tenants?: true
   end
 
+  policies do
+    # Authenticating a request by key prefix runs before any actor exists and is done by
+    # the authenticator with authorization off (doc 10 §3.1); everything else comes through here.
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: [:coordinator, :session, :api]}
+      authorize_if OrgAdmin
+      authorize_if {ScopedRead, or_principal: :principal_id}
+    end
+
+    policy action([:create, :update]) do
+      authorize_if OrgAdmin
+      authorize_if {SystemActor, roles: [:api, :jobs]}
+    end
+
+    policy action([:destroy]) do
+      authorize_if OrgAdmin
+      authorize_if {SystemActor, roles: [:jobs]}
+    end
+  end
+
   actions do
     defaults [:read, :destroy]
 
     create :create do
       primary? true
       accept [:principal_id, :prefix, :secret_sha256, :scopes, :target_ids, :expires_at]
+      change Steward.Core.Targets.ApiKey.ValidateScopes
     end
 
     update :update do
       primary? true
       accept [:scopes, :target_ids, :last_used_at, :revoked_at]
+      require_atomic? false
+      change Steward.Core.Targets.ApiKey.ValidateScopes
     end
   end
 end

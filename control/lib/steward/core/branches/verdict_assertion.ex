@@ -5,8 +5,11 @@ defmodule Steward.Core.Branches.VerdictAssertion do
   plus a tenant-scoped unique identity on those two columns, same pattern
   as `Steward.Core.Targets.TargetMembership`. Append-only.
   """
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -79,6 +82,17 @@ defmodule Steward.Core.Branches.VerdictAssertion do
 
   identities do
     identity :unique_verdict_assertion, [:verdict_id, :policy_assertion_id]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "changeset:read", target: {:via, [:verdict, :changeset]}}
+    end
+
+    policy action([:create]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+    end
   end
 
   actions do

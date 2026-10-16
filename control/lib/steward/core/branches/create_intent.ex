@@ -3,8 +3,11 @@ defmodule Steward.Core.Branches.CreateIntent do
   Doc 12 §2.3 `create_intents` (doc 13 §6.1). `id` is the candidate branch
   ID; `branch_id` is only set once `Branch.create` (the checkpoint) commits.
   """
+  alias Steward.Core.Authz.Checks.{ActsAs, Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -45,6 +48,25 @@ defmodule Steward.Core.Branches.CreateIntent do
 
   identities do
     identity :unique_idempotency_key, [:principal_id, :idempotency_key]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, or_principal: :principal_id}
+    end
+
+    # The caller-facing entry of branch creation (doc 13 §6.1): `branch:write` on the
+    # target, acting as themselves.
+    policy action([:create]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+      forbid_unless {ActsAs, attribute: :principal_id}
+      authorize_if {Scope, scope: "branch:write"}
+    end
+
+    policy action([:commit, :fail, :supersede]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+    end
   end
 
   actions do

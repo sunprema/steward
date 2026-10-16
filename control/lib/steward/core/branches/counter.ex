@@ -1,7 +1,10 @@
 defmodule Steward.Core.Branches.Counter do
   @moduledoc "Doc 12 §2.3 `counters` — totals derived from `CounterDelta` by `CounterDrain` (doc 07 §5.8)."
+  alias Steward.Core.Authz.Checks.{SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -27,6 +30,16 @@ defmodule Steward.Core.Branches.Counter do
 
   identities do
     identity :unique_key_scope, [:key, :scope]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: [:api, :jobs, :coordinator]}
+    end
+
+    policy action([:upsert]) do
+      authorize_if {SystemActor, roles: [:jobs, :coordinator]}
+    end
   end
 
   actions do

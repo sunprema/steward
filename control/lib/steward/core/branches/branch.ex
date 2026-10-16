@@ -8,8 +8,11 @@ defmodule Steward.Core.Branches.Branch do
   `proposed`, never from `proposed` to `open` — a documentation bug fixed
   alongside this code per doc 18 §6, since doc 13 is still `Draft`).
   """
+  alias Steward.Core.Authz.Checks.{ActsAs, Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer,
     extensions: [AshStateMachine]
 
@@ -123,6 +126,57 @@ defmodule Steward.Core.Branches.Branch do
     identity :unique_id_overlay_id, [:id, :overlay_id], all_tenants?: true
     identity :unique_idempotency_key, [:principal_id, :idempotency_key]
     identity :unique_org_id, [:id]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "changeset:read", or_principal: :principal_id}
+    end
+
+    # Created by the CreateBranch reactor with data-plane facts (overlay, snapshot); an API
+    # caller's authority is checked on `CreateIntent.create` (branch:write).
+    policy action([:create]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+    end
+
+    policy action([:propose]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+      forbid_unless {ActsAs, attribute: :principal_id}
+      authorize_if {Scope, scope: "branch:propose"}
+    end
+
+    # Withdraw: owner only (doc 13 §7). The coordinator also returns branches to open
+    # (retry-allowed rejection, stale base).
+    policy action([:return_to_open]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+      forbid_unless {ActsAs, attribute: :principal_id}
+      authorize_if {Scope, scope: "branch:write"}
+    end
+
+    # Owner may abandon their own branch; `target:admin` may abandon any (doc 15 §3.2).
+    policy action([:abandon]) do
+      authorize_if {SystemActor, roles: [:coordinator, :jobs]}
+      authorize_if {Scope, scope: "target:admin"}
+      forbid_unless {ActsAs, attribute: :principal_id}
+      authorize_if {Scope, scope: "branch:write"}
+    end
+
+    policy action([:lose_snapshot]) do
+      authorize_if {SystemActor, roles: [:coordinator, :session]}
+    end
+
+    policy action([:heartbeat_touch]) do
+      authorize_if {SystemActor, roles: [:session, :coordinator]}
+    end
+
+    policy action([:reject, :start_merge, :complete_merge, :fail_merge]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+    end
+
+    policy action([:close]) do
+      authorize_if {SystemActor, roles: [:jobs, :coordinator]}
+    end
   end
 
   actions do

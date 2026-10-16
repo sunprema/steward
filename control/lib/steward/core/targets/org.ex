@@ -3,8 +3,11 @@ defmodule Steward.Core.Targets.Org do
   Doc 12 §2.3 `orgs` — the tenant root; the one resource in the schema with
   no `org_id` column (doc 12 §10's three-table allow-list).
   """
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Targets,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -30,6 +33,18 @@ defmodule Steward.Core.Targets.Org do
 
   identities do
     identity :unique_slug, [:slug]
+  end
+
+  policies do
+    # Orgs are provisioned out of band (doc 07 §8); no API actor creates or changes one.
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any, tenantless: true}
+      authorize_if {ScopedRead, target: :own_org, tenantless: true}
+    end
+
+    policy action([:create, :update, :destroy]) do
+      authorize_if {SystemActor, roles: [:jobs], tenantless: true}
+    end
   end
 
   actions do

@@ -17,6 +17,7 @@ defmodule Steward.Core do
   use Boundary,
     deps: [Steward.Repo],
     exports: [
+      {Authz, []},
       {Targets, []},
       {Branches, []},
       {Policies, []},

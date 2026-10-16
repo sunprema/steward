@@ -6,7 +6,7 @@ defmodule Steward.Core.Targets do
   domains; decided here as the closest fit (doc 18 §5).
   """
   use Boundary,
-    deps: [Steward.Core.Types, Steward.Core.Audit],
+    deps: [Steward.Core.Types, Steward.Core.Authz, Steward.Core.Audit],
     exports: [
       Org,
       Principal,

@@ -9,8 +9,11 @@ defmodule Steward.Core.Targets.Target do
   themselves (doc 07 §5.4) are the `Merge` reactor's first step (E6, out of
   scope here) — this resource only needs to hold and expose the columns.
   """
+  alias Steward.Core.Authz.Checks.{Scope, ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Targets,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -59,6 +62,28 @@ defmodule Steward.Core.Targets.Target do
     # Doc 12 §1: parents carry UNIQUE (org_id, id), so a child's composite
     # (org_id, foo_id) FK (`match_tenant?: true`) has something to reference.
     identity :unique_org_id, [:id]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: :any, target: :id}
+    end
+
+    # Registering a target: `target:admin` on any target (doc 15 §3.2). Bootstrapping the
+    # first target of an org is done out of band; see the E1b notes.
+    policy action([:create]) do
+      authorize_if {Scope, scope: "target:admin", target: :any}
+    end
+
+    policy action([:update]) do
+      authorize_if {SystemActor, roles: [:session, :coordinator]}
+      authorize_if {Scope, scope: "target:admin", target: :id}
+    end
+
+    policy action([:destroy]) do
+      authorize_if {SystemActor, roles: [:jobs]}
+    end
   end
 
   actions do

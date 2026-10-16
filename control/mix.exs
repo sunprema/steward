@@ -66,6 +66,7 @@ defmodule Steward.MixProject do
       {:ash_postgres, "~> 2.14"},
       {:ash_state_machine, "~> 0.2.13"},
       {:reactor, "~> 1.0"},
+      {:picosat_elixir, "~> 0.2"},
       {:ash_oban, "~> 0.10.1"},
       {:ash_phoenix, "~> 2.3"},
       {:boundary, "~> 0.11.0", runtime: false}

@@ -1,7 +1,10 @@
 defmodule Steward.Core.Branches.Changeset do
   @moduledoc "Doc 12 §2.2 `changesets`. Transitions from doc 13 §3: `computing → evaluated`, `{computing,evaluated} → superseded`."
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer,
     extensions: [AshStateMachine]
 
@@ -117,6 +120,25 @@ defmodule Steward.Core.Branches.Changeset do
     identity :unique_sequence, [:branch_id, :sequence]
     identity :one_live_per_branch, [:branch_id], where: expr(state != :superseded)
     identity :unique_org_id, [:id]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "changeset:read"}
+    end
+
+    policy action([:create, :evaluate]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+    end
+
+    policy action([:record_computed]) do
+      authorize_if {SystemActor, roles: [:coordinator, :session]}
+    end
+
+    policy action([:bump_compute_attempts, :supersede]) do
+      authorize_if {SystemActor, roles: [:coordinator, :jobs]}
+    end
   end
 
   actions do

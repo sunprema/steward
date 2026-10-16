@@ -1,7 +1,10 @@
 defmodule Steward.Core.Branches.CounterDelta do
   @moduledoc "Doc 12 §2.3 `counter_deltas`; drained into `Counter` by `CounterDrain` (doc 07 §5.8, E8, out of scope here)."
+  alias Steward.Core.Authz.Checks.{SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -31,6 +34,20 @@ defmodule Steward.Core.Branches.CounterDelta do
     attribute :delta, :integer, allow_nil?: false
 
     create_timestamp :inserted_at
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: [:jobs]}
+    end
+
+    policy action([:create]) do
+      authorize_if {SystemActor, roles: [:coordinator, :jobs, :api]}
+    end
+
+    policy action([:destroy]) do
+      authorize_if {SystemActor, roles: [:jobs]}
+    end
   end
 
   actions do

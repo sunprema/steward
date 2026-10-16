@@ -4,8 +4,11 @@ defmodule Steward.Core.Audit.AuditLog do
   row-delta reads, compensation access, API-key/membership/target-settings/
   legal-hold/policy-activation changes). Append-only.
   """
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Audit,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -64,6 +67,17 @@ defmodule Steward.Core.Audit.AuditLog do
     attribute :details, :map, allow_nil?: false, default: %{}
     attribute :occurred_at, :utc_datetime_usec, allow_nil?: false
     create_timestamp :inserted_at
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "audit:read", target: :org}
+    end
+
+    policy action([:create]) do
+      authorize_if {SystemActor, roles: [:session, :api, :coordinator]}
+    end
   end
 
   actions do

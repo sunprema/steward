@@ -4,8 +4,11 @@ defmodule Steward.Core.Branches.Merge do
   Transitions from doc 13 §6.5/§6.6, doc 12 §4: `pending → applied`,
   `pending → failed`, `applied → compensated`.
   """
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Branches,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer,
     extensions: [AshStateMachine]
 
@@ -101,6 +104,25 @@ defmodule Steward.Core.Branches.Merge do
   identities do
     identity :unique_pending_per_target, [:target_id], where: expr(state == :pending)
     identity :unique_live_per_changeset, [:changeset_id], where: expr(state != :failed)
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "changeset:read"}
+    end
+
+    policy action([:create, :record_compensation_persisted, :complete, :fail, :compensate]) do
+      authorize_if {SystemActor, roles: [:coordinator]}
+    end
+
+    policy action([:record_progress]) do
+      authorize_if {SystemActor, roles: [:session, :coordinator]}
+    end
+
+    policy action([:alert_stalled]) do
+      authorize_if {SystemActor, roles: [:jobs]}
+    end
   end
 
   actions do

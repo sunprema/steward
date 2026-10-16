@@ -1,7 +1,10 @@
 defmodule Steward.Core.Audit.WebhookDelivery do
   @moduledoc "Doc 12 §2.3 `webhook_deliveries`. 7-day retention via `DeliveryPurge` (E12, out of scope here)."
+  alias Steward.Core.Authz.Checks.{ScopedRead, SystemActor}
+
   use Ash.Resource,
     domain: Steward.Core.Audit,
+    authorizers: [Ash.Policy.Authorizer],
     data_layer: AshPostgres.DataLayer
 
   postgres do
@@ -45,6 +48,17 @@ defmodule Steward.Core.Audit.WebhookDelivery do
 
   identities do
     identity :unique_attempt, [:webhook_id, :event_id, :attempt]
+  end
+
+  policies do
+    policy action_type(:read) do
+      authorize_if {SystemActor, roles: :any}
+      authorize_if {ScopedRead, scope: "webhook:admin", target: :org}
+    end
+
+    policy action([:create, :update, :destroy]) do
+      authorize_if {SystemActor, roles: [:jobs]}
+    end
   end
 
   actions do
