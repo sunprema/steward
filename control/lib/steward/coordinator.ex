@@ -17,10 +17,16 @@ defmodule Steward.Coordinator do
       ├── PartitionSupervisor (Steward.Coordinator.BranchSupervisors)
       │     └── DynamicSupervisor × schedulers
       │           └── Steward.Coordinator.Branch × non-terminal branches
+      ├── Steward.Coordinator.HeartbeatFlusher
+      ├── Steward.Coordinator.Plane (stream registry + Plane.Session per data plane)
       └── Steward.Coordinator.BootSweeper (unless disabled in config)
 
-  Not here yet: Reactors (E4), the `Session` host and `HeartbeatFlusher` (E3),
-  the merge lease and `Merge` handling behind `:renew_lease`/`:advance_merged`/
+  The `Session` stream (E3): `Steward.Coordinator.Plane` holds the per-identity
+  sessions and the instruction queue, `Plane.Upstream` handles what data planes
+  send, and `HeartbeatFlusher` writes heartbeat times in batches. The gRPC shell
+  around them is `StewardWeb.Plane.Server`.
+
+  Not here yet: Reactors (E4), the merge lease and `Merge` handling behind `:renew_lease`/`:advance_merged`/
   `:resend_merge` (E6), AshOban scheduling of `TerminalProcessSweep`, and
   cross-node uniqueness (`:pg`); this runs one node.
   """
@@ -32,9 +38,24 @@ defmodule Steward.Coordinator do
       Steward.Core.Authz,
       Steward.Core.Types
     ],
-    exports: [Branch, HeartbeatMatrix, BootSweeper, TerminalProcessSweep, Heartbeat, Lifecycle]
+    exports: [
+      Branch,
+      HeartbeatMatrix,
+      BootSweeper,
+      TerminalProcessSweep,
+      Heartbeat,
+      HeartbeatActions,
+      Lifecycle,
+      Plane,
+      Plane.Upstream,
+      Plane.Wire,
+      Plane.Limiter,
+      Plane.Handlers,
+      Plane.Directory,
+      HeartbeatFlusher
+    ]
 
-  alias Steward.Coordinator.{Branch, BootSweeper}
+  alias Steward.Coordinator.{Branch, BootSweeper, HeartbeatFlusher, Plane}
 
   @registry Steward.Coordinator.Registry
   @supervisors Steward.Coordinator.BranchSupervisors
@@ -60,7 +81,9 @@ defmodule Steward.Coordinator do
     children =
       [
         {Registry, keys: :unique, name: @registry},
-        {PartitionSupervisor, child_spec: DynamicSupervisor, name: @supervisors}
+        {PartitionSupervisor, child_spec: DynamicSupervisor, name: @supervisors},
+        HeartbeatFlusher,
+        Plane
       ] ++ if(boot_sweep?, do: [BootSweeper], else: [])
 
     Supervisor.start_link(children, strategy: :rest_for_one, name: Steward.Coordinator.Supervisor)

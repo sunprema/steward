@@ -68,12 +68,12 @@ defmodule Steward.MixProject do
       {:reactor, "~> 1.0"},
       {:picosat_elixir, "~> 0.2"},
       {:grpc, "~> 1.0"},
-      # The control plane is the gRPC *server* (doc 07 §3.1); the generated stubs
-      # need `grpc`/`protobuf` at compile time. The client transport, and until E3
-      # the server, are only used by the fake data plane in tests.
+      # The control plane is the gRPC *server* (doc 07 §3.1, E3); the generated
+      # stubs need `grpc`/`protobuf`. The client transport is only used by the fake
+      # data plane in tests.
+      {:grpc_server, "~> 1.0"},
       {:mint, "~> 1.9", only: :test},
       {:castore, "~> 1.0", only: :test},
-      {:grpc_server, "~> 1.0", only: :test},
       {:protobuf, "~> 0.17"},
       {:ash_oban, "~> 0.10.1"},
       {:ash_phoenix, "~> 2.3"},

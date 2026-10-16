@@ -24,6 +24,28 @@ config :steward, StewardWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
 if config_env() == :prod do
+  # The Session listener (doc 07 §3.1, doc 14 §3.1) authenticates data planes by
+  # client certificate; header identity is a development convenience and is
+  # refused here, as is a plaintext listener.
+  plane_tls = [
+    certfile: System.get_env("PLANE_TLS_CERTFILE"),
+    keyfile: System.get_env("PLANE_TLS_KEYFILE"),
+    cacertfile: System.get_env("PLANE_TLS_CACERTFILE")
+  ]
+
+  if Enum.any?(plane_tls, fn {_, v} -> is_nil(v) end) do
+    raise """
+    PLANE_TLS_CERTFILE, PLANE_TLS_KEYFILE and PLANE_TLS_CACERTFILE are required:
+    the Session stream is mTLS-only in production (doc 14 §3.1).
+    """
+  end
+
+  config :steward, StewardWeb.Plane,
+    start_server: true,
+    port: String.to_integer(System.get_env("PLANE_PORT", "50051")),
+    identity: :cert,
+    tls: plane_tls
+
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """
