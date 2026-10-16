@@ -1,0 +1,268 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuid_generate_v7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "org_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "status",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "0",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "count",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "false",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "count_capped",
+      "type": "boolean"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "denominator",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "sample_ref",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "error_code",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "duration_ms",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": "org_id",
+          "global": false,
+          "strategy": "attribute"
+        },
+        "name": "verdict_assertions_verdict_id_fkey",
+        "on_delete": null,
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "verdicts"
+      },
+      "scale": null,
+      "size": null,
+      "source": "verdict_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": "org_id",
+          "global": false,
+          "strategy": "attribute"
+        },
+        "name": "verdict_assertions_policy_assertion_id_fkey",
+        "on_delete": null,
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "policy_assertions"
+      },
+      "scale": null,
+      "size": null,
+      "source": "policy_assertion_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "error_code"
+      ],
+      "base_filter": null,
+      "check": "(status = 'error') = (error_code IS NOT NULL)",
+      "name": "error_has_code"
+    },
+    {
+      "attribute": [
+        "sample_ref"
+      ],
+      "base_filter": null,
+      "check": "sample_ref IS NULL OR sample_ref ~ '^[0-9a-f-]{36}/[a-z0-9-]+/[a-z0-9-]+$'",
+      "name": "sample_ref_shape"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION IF EXISTS raise_immutable();",
+      "global?": false,
+      "name": "raise_immutable_fn",
+      "up": "CREATE OR REPLACE FUNCTION raise_immutable() RETURNS trigger AS $BODY$\nBEGIN\n  RAISE EXCEPTION 'table % is append-only', TG_TABLE_NAME;\nEND;\n$BODY$ LANGUAGE plpgsql;\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER IF EXISTS verdict_assertions_immutable ON verdict_assertions;",
+      "global?": false,
+      "name": "verdict_assertions_immutable_trigger",
+      "up": "CREATE TRIGGER verdict_assertions_immutable BEFORE UPDATE OR DELETE ON verdict_assertions FOR EACH ROW EXECUTE FUNCTION raise_immutable();"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DO $BODY$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'steward_app') THEN\n    EXECUTE 'GRANT INSERT, SELECT ON verdict_assertions TO steward_app';\n  END IF;\nEND;\n$BODY$;\n",
+      "global?": false,
+      "name": "verdict_assertions_grants",
+      "up": "DO $BODY$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'steward_app') THEN\n    EXECUTE 'REVOKE UPDATE, DELETE ON verdict_assertions FROM steward_app';\n  END IF;\nEND;\n$BODY$;\n"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "1A65F123144ABAC04C55BA1E4886A087DBEFBD662DAF9AA74B3F1D8FEFC58D22",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "verdict_assertions_unique_verdict_assertion_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "verdict_id"
+        },
+        {
+          "type": "atom",
+          "value": "policy_assertion_id"
+        }
+      ],
+      "name": "unique_verdict_assertion",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": "org_id",
+    "global": false,
+    "strategy": "attribute"
+  },
+  "repo": "Elixir.Steward.Repo",
+  "schema": null,
+  "table": "verdict_assertions",
+  "temporal": null
+}

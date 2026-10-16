@@ -19,7 +19,7 @@ stateDiagram-v2
     [*] --> open : create (checkpoint: branch row written)
     open --> proposed : propose
     open --> abandoned : abandon / TTL expiry
-    proposed --> open : withdraw / reject_with_retry / stale_base
+    proposed --> open : withdraw / reject_with_retry
     proposed --> merging : verdict auto-merge / review approve
     proposed --> rejected : verdict block / review reject
     proposed --> abandoned : abandon / held-TTL expiry
@@ -52,7 +52,7 @@ Every transition is initiated by the control plane writing the new state to the 
 |-----------|---------|---------------|--------------|-----------|
 | `[*]` → `open` | Principal calls create branch | Target registered; principal authorised on target; overlay initialised in data plane | Branch row written with branch ID and overlay ID; routing store updated (best-effort); TTL clock starts | Control plane |
 | `open` → `proposed` | Owning principal calls propose | Branch is `open`; idempotency key not seen | Writes frozen in proxy; changeset `computing` created; prior changesets `superseded` | Control plane |
-| `proposed` → `open` | Owning principal withdraws; reviewer rejects-with-retry; merge fails with `stale_base` | Branch is `proposed` (or `merging` before compensation checkpoint for `stale_base`) | Current changeset `superseded`; proxy unfreezes writes on next heartbeat or on the synchronous reply | Control plane |
+| `proposed` → `open` | Owning principal withdraws; reviewer rejects-with-retry | Branch is `proposed` | Current changeset `superseded`; proxy unfreezes writes on next heartbeat or on the synchronous reply | Control plane |
 | `proposed` → `merging` | Verdict `auto-merge` recorded; or review `approved` recorded | Changeset `evaluated`; verdict is not `block`; per-target merge lease acquired (section 7) | Merge row created `pending` with fresh merge ID; data plane told to merge | Control plane |
 | `proposed` → `rejected` | Verdict `block` recorded; or review `rejected` recorded | Changeset `evaluated` | Queue entry removed; principal notified with reasons | Control plane |
 | `proposed` → `abandoned` | Owning principal calls abandon; or held-changeset TTL expires | Branch is `proposed` and not `merging` | Queue entry removed; changeset `superseded` | Control plane |

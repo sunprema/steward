@@ -1,0 +1,194 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": true,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "org_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "principal_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "action",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "object_type",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "object_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "grant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "data_plane_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "%{}",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "details",
+      "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "occurred_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION IF EXISTS validate_boundary_json();",
+      "global?": false,
+      "name": "validate_boundary_json_fn",
+      "up": "CREATE OR REPLACE FUNCTION validate_boundary_json() RETURNS trigger AS $BODY$\nDECLARE\n  val jsonb;\nBEGIN\n  val := (row_to_json(NEW)::jsonb) -> TG_ARGV[0];\n  IF val IS NOT NULL AND (\n    jsonb_path_exists(val, '$.**.rows') OR jsonb_path_exists(val, '$.**.row') OR\n    jsonb_path_exists(val, '$.**.sample_keys') OR jsonb_path_exists(val, '$.**.before_image') OR\n    jsonb_path_exists(val, '$.**.after_image') OR jsonb_path_exists(val, '$.**.values') OR\n    jsonb_path_exists(val, '$.**.key') OR jsonb_path_exists(val, '$.**.keys')\n  ) THEN\n    RAISE EXCEPTION 'boundary violation: % contains a banned key', TG_ARGV[0];\n  END IF;\n  RETURN NEW;\nEND;\n$BODY$ LANGUAGE plpgsql;\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER IF EXISTS validate_boundary_json_details ON audit_log;",
+      "global?": false,
+      "name": "validate_boundary_json_details",
+      "up": "CREATE TRIGGER validate_boundary_json_details BEFORE INSERT OR UPDATE ON audit_log FOR EACH ROW EXECUTE FUNCTION validate_boundary_json('details');"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION IF EXISTS raise_immutable();",
+      "global?": false,
+      "name": "raise_immutable_fn",
+      "up": "CREATE OR REPLACE FUNCTION raise_immutable() RETURNS trigger AS $BODY$\nBEGIN\n  RAISE EXCEPTION 'table % is append-only', TG_TABLE_NAME;\nEND;\n$BODY$ LANGUAGE plpgsql;\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER IF EXISTS audit_log_immutable ON audit_log;",
+      "global?": false,
+      "name": "audit_log_immutable_trigger",
+      "up": "CREATE TRIGGER audit_log_immutable BEFORE UPDATE OR DELETE ON audit_log FOR EACH ROW EXECUTE FUNCTION raise_immutable();"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DO $BODY$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'steward_app') THEN\n    EXECUTE 'GRANT INSERT, SELECT ON audit_log TO steward_app';\n  END IF;\nEND;\n$BODY$;\n",
+      "global?": false,
+      "name": "audit_log_grants",
+      "up": "DO $BODY$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'steward_app') THEN\n    EXECUTE 'REVOKE UPDATE, DELETE ON audit_log FROM steward_app';\n  END IF;\nEND;\n$BODY$;\n"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "AB92B36B4174F72FDC045D995617ABD779C06E25DD5906006AC3593719B6518D",
+  "identities": [],
+  "multitenancy": {
+    "attribute": "org_id",
+    "global": false,
+    "strategy": "attribute"
+  },
+  "repo": "Elixir.Steward.Repo",
+  "schema": null,
+  "table": "audit_log",
+  "temporal": null
+}

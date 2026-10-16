@@ -1,0 +1,280 @@
+defmodule Steward.Core.Branches.Branch do
+  @moduledoc """
+  Doc 12 §2.2 `branches`. `AshStateMachine` transitions declared literally
+  from doc 13 §2's state diagram, which is authoritative over §2.1's prose
+  table where the two disagree (the table's "proposed → open" row lists
+  `stale_base` as a trigger; §6.5 and the table's own "merging → proposed"
+  row make clear `stale_base` only ever returns a branch from `merging` to
+  `proposed`, never from `proposed` to `open` — a documentation bug fixed
+  alongside this code per doc 18 §6, since doc 13 is still `Draft`).
+  """
+  use Ash.Resource,
+    domain: Steward.Core.Branches,
+    data_layer: AshPostgres.DataLayer,
+    extensions: [AshStateMachine]
+
+  postgres do
+    table "branches"
+    repo Steward.Repo
+
+    # Doc 12 §1: FKs that could cross an org are composite on (org_id, id).
+    references do
+      reference :target, match_tenant?: true
+      reference :principal, match_tenant?: true
+    end
+
+    check_constraints do
+      check_constraint :state, "terminal_has_reason",
+        check: """
+        state NOT IN ('merged','rejected','abandoned','closed')
+        OR (reason IS NOT NULL AND terminal_at IS NOT NULL
+            AND (terminal_by_principal_id IS NOT NULL OR terminal_by_job IS NOT NULL))
+        """
+
+      check_constraint :ttl_expires_at, "open_has_ttl",
+        check: "state <> 'open' OR ttl_expires_at IS NOT NULL"
+
+      check_constraint :overlay_released_at, "released_only_when_closed",
+        check: "overlay_released_at IS NULL OR state = 'closed'"
+
+      check_constraint :overlay_released_at, "closed_is_released",
+        check: "state <> 'closed' OR overlay_released_at IS NOT NULL"
+
+      check_constraint :merge_wait, "merge_wait_only_proposed",
+        check: "NOT merge_wait OR state = 'proposed'"
+    end
+  end
+
+  multitenancy do
+    strategy :attribute
+    attribute :org_id
+  end
+
+  state_machine do
+    initial_states [:open]
+    default_initial_state :open
+    state_attribute :state
+
+    transitions do
+      transition :propose, from: :open, to: :proposed
+      transition :return_to_open, from: :proposed, to: :open
+      transition :start_merge, from: :proposed, to: :merging
+      transition :reject, from: :proposed, to: :rejected
+      transition :abandon, from: [:open, :proposed], to: :abandoned
+      transition :lose_snapshot, from: [:open, :proposed, :merging], to: :abandoned
+      transition :complete_merge, from: :merging, to: :merged
+      transition :fail_merge, from: :merging, to: :proposed
+      transition :close, from: [:merged, :rejected, :abandoned], to: :closed
+    end
+  end
+
+  attributes do
+    uuid_v7_primary_key :id
+    attribute :org_id, :uuid, allow_nil?: false
+
+    attribute :overlay_id, :uuid, allow_nil?: false
+    attribute :base_snapshot_ref, :string, allow_nil?: false, sensitive?: true
+    attribute :base_snapshot_fidelity, Steward.Core.Types.SnapshotFidelity, allow_nil?: false
+    attribute :base_snapshot_at, :utc_datetime_usec, allow_nil?: false
+    attribute :state, Steward.Core.Types.BranchState, allow_nil?: false, default: :open
+    attribute :reason, Steward.Core.Types.LifecycleReason, allow_nil?: true
+    attribute :idempotency_key, :string, allow_nil?: false
+    attribute :ttl_expires_at, :utc_datetime_usec, allow_nil?: true
+    attribute :held_ttl_expires_at, :utc_datetime_usec, allow_nil?: true
+    attribute :proposed_at, :utc_datetime_usec, allow_nil?: true
+    attribute :last_heartbeat_at, :utc_datetime_usec, allow_nil?: true
+    attribute :heartbeat_lost, :boolean, allow_nil?: false, default: false
+    attribute :merge_wait, :boolean, allow_nil?: false, default: false
+    attribute :overlay_rows, :integer, allow_nil?: false, default: 0
+    attribute :overlay_bytes, :integer, allow_nil?: false, default: 0
+    attribute :evidence_gap, :integer, allow_nil?: false, default: 0
+    attribute :terminal_at, :utc_datetime_usec, allow_nil?: true
+    attribute :terminal_by_job, :string, allow_nil?: true
+    attribute :overlay_released_at, :utc_datetime_usec, allow_nil?: true
+    attribute :lock_version, :integer, allow_nil?: false, default: 0
+
+    create_timestamp :inserted_at
+    update_timestamp :updated_at
+  end
+
+  relationships do
+    belongs_to :target, Steward.Core.Targets.Target do
+      allow_nil? false
+      attribute_writable? true
+    end
+
+    belongs_to :principal, Steward.Core.Targets.Principal do
+      allow_nil? false
+      attribute_writable? true
+    end
+
+    belongs_to :revert_of_merge, Steward.Core.Branches.Merge do
+      attribute_writable? true
+    end
+
+    belongs_to :terminal_by_principal, Steward.Core.Targets.Principal do
+      source_attribute :terminal_by_principal_id
+      attribute_writable? true
+    end
+  end
+
+  identities do
+    identity :unique_overlay_id, [:overlay_id], all_tenants?: true
+    identity :unique_id_overlay_id, [:id, :overlay_id], all_tenants?: true
+    identity :unique_idempotency_key, [:principal_id, :idempotency_key]
+    identity :unique_org_id, [:id]
+  end
+
+  actions do
+    defaults [:read]
+
+    create :create do
+      primary? true
+
+      accept [
+        :target_id,
+        :principal_id,
+        :overlay_id,
+        :base_snapshot_ref,
+        :base_snapshot_fidelity,
+        :base_snapshot_at,
+        :idempotency_key,
+        :ttl_expires_at,
+        :revert_of_merge_id
+      ]
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.created",
+              aggregate_type: "branch",
+              payload: &__MODULE__.created_payload/2}
+    end
+
+    update :propose do
+      accept []
+      change transition_state(:proposed)
+      change set_attribute(:proposed_at, &DateTime.utc_now/0)
+    end
+
+    update :return_to_open do
+      accept [:reason]
+      require_atomic? false
+      change transition_state(:open)
+      change set_attribute(:merge_wait, false)
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.returned_to_open",
+              aggregate_type: "branch",
+              payload: &__MODULE__.reason_payload/2}
+    end
+
+    update :start_merge do
+      accept [:reason]
+      require_atomic? false
+      argument :merge_id, :uuid, allow_nil?: false
+      change transition_state(:merging)
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.merging",
+              aggregate_type: "branch",
+              payload: &__MODULE__.start_merge_payload/2}
+    end
+
+    update :reject do
+      accept [:reason, :terminal_by_principal_id, :terminal_by_job]
+      require_atomic? false
+      change transition_state(:rejected)
+      change set_attribute(:terminal_at, &DateTime.utc_now/0)
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.rejected",
+              aggregate_type: "branch",
+              payload: &__MODULE__.reason_payload/2}
+    end
+
+    update :abandon do
+      accept [:reason, :terminal_by_principal_id, :terminal_by_job]
+      require_atomic? false
+      change transition_state(:abandoned)
+      change set_attribute(:terminal_at, &DateTime.utc_now/0)
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.abandoned",
+              aggregate_type: "branch",
+              payload: &__MODULE__.abandoned_payload/2}
+    end
+
+    update :lose_snapshot do
+      accept [:reason, :terminal_by_job]
+      require_atomic? false
+      change transition_state(:abandoned)
+      change set_attribute(:terminal_at, &DateTime.utc_now/0)
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.abandoned",
+              aggregate_type: "branch",
+              payload: &__MODULE__.abandoned_payload/2}
+    end
+
+    update :complete_merge do
+      accept [:terminal_by_job]
+      require_atomic? false
+      argument :merge_id, :uuid, allow_nil?: false
+      change transition_state(:merged)
+      change set_attribute(:reason, :merge_applied)
+      change set_attribute(:terminal_at, &DateTime.utc_now/0)
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.merged",
+              aggregate_type: "branch",
+              payload: &__MODULE__.merge_id_payload/2}
+    end
+
+    update :fail_merge do
+      accept [:reason]
+      change transition_state(:proposed)
+    end
+
+    update :close do
+      accept [:overlay_released_at, :terminal_by_job]
+      require_atomic? false
+      change transition_state(:closed)
+      change set_attribute(:reason, :retention_elapsed)
+
+      change {Steward.Core.Audit.AppendEvent,
+              type: "branch.closed",
+              aggregate_type: "branch",
+              payload: &__MODULE__.closed_payload/2}
+    end
+
+    update :heartbeat_touch do
+      accept [:last_heartbeat_at, :heartbeat_lost, :overlay_rows, :overlay_bytes, :evidence_gap]
+      require_atomic? false
+    end
+  end
+
+  def created_payload(_changeset, record) do
+    %{
+      principal_id: record.principal_id,
+      overlay_id: record.overlay_id,
+      base_snapshot_fidelity: record.base_snapshot_fidelity,
+      revert_of_merge_id: record.revert_of_merge_id,
+      ttl_expires_at: record.ttl_expires_at
+    }
+  end
+
+  def reason_payload(_changeset, record), do: %{reason: record.reason}
+
+  def abandoned_payload(changeset, record) do
+    %{from_state: changeset.data.state, reason: record.reason}
+  end
+
+  def start_merge_payload(changeset, record) do
+    %{merge_id: Ash.Changeset.get_argument(changeset, :merge_id), via: record.reason}
+  end
+
+  def merge_id_payload(changeset, _record) do
+    %{merge_id: Ash.Changeset.get_argument(changeset, :merge_id)}
+  end
+
+  def closed_payload(_changeset, record), do: %{overlay_released_at: record.overlay_released_at}
+end

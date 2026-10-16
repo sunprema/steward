@@ -1,0 +1,102 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": true,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "org_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "key",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "%{}",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "scope",
+      "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "delta",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DO $BODY$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'steward_app') THEN\n    EXECUTE 'GRANT INSERT, SELECT, DELETE ON counter_deltas TO steward_app';\n  END IF;\nEND;\n$BODY$;\n",
+      "global?": false,
+      "name": "counter_deltas_grants",
+      "up": "DO $BODY$\nBEGIN\n  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'steward_app') THEN\n    EXECUTE 'REVOKE UPDATE ON counter_deltas FROM steward_app';\n  END IF;\nEND;\n$BODY$;\n"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "32D25CC003EB3C1060CBC4B560667C0A96165B14B2429D2BF5D066003DC301F5",
+  "identities": [],
+  "multitenancy": {
+    "attribute": "org_id",
+    "global": false,
+    "strategy": "attribute"
+  },
+  "repo": "Elixir.Steward.Repo",
+  "schema": null,
+  "table": "counter_deltas",
+  "temporal": null
+}
