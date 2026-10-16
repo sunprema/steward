@@ -64,6 +64,10 @@ mix steward.contracts.gen --check  # fail if the checked-in stubs are stale
 
 `Steward.Coordinator` (E2) runs one process per non-terminal branch, found through `Steward.Coordinator.Registry` and supervised by a `PartitionSupervisor`; process state is a cache of the row. Transitions go through `Steward.Coordinator.Branch.transition/5` (an Ash action guarded by `lock_version`); heartbeats through `Steward.Coordinator.Heartbeat.handle/2`, decided by the declared matrix in `Steward.Coordinator.HeartbeatMatrix`. Tests that start processes use `Steward.CoordinatorCase`; `boot_sweep` is off in `config/test.exs`.
 
+## Lifecycle flows
+
+`Steward.Coordinator.Flows` (E4) is how a controller or a job drives a branch: `create_branch/1`, `propose/1` (answers with the computing changeset, finishes in the background), `withdraw/1`, `abandon/1`. Each is one Reactor under `Steward.Coordinator.Reactors` with a single checkpoint; steps after it use `Reactors.BestEffort` and cannot fail the flow. Tests that run flows end to end use `Steward.SessionHarness` (the shared Session listener plus a connected fake data plane). Scheduled work is Oban: AshOban triggers on the resources, plain cron workers in `Steward.Jobs`; drain triggers in tests with `AshOban.Test`.
+
 ## Session host
 
 `StewardWeb.Plane.Server` serves `steward.plane.v1.Session` on port 50051 (E3). It is framing and identity only; `Steward.Coordinator.Plane` holds the per-data-plane sessions and the instruction queue (`Plane.send_instruction/4`: reply deadlines, re-send on reconnect), and `Plane.Upstream` handles what data planes send. Development trusts the `x-steward-data-plane-id` header; `config/runtime.exs` requires `PLANE_TLS_CERTFILE`, `PLANE_TLS_KEYFILE` and `PLANE_TLS_CACERTFILE` in production, and identifies a data plane by its client certificate. Tests start their own listener on a free port; the fake data plane dials it (`transport: {:grpc, address}`).

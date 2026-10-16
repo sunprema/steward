@@ -22,6 +22,26 @@ config :steward,
 
 config :steward, Steward.Repo, types: Steward.PostgrexTypes
 
+# Oban (doc 07 §4): AshOban adds its triggers' crons to the Cron plugin; the two
+# plain workers that call into the coordinator (`Steward.Jobs`) are listed here.
+config :steward, Oban,
+  engine: Oban.Engines.Basic,
+  repo: Steward.Repo,
+  queues: [
+    default: 5,
+    branch_expire_ttl: 2,
+    branch_reject_blocked: 2,
+    changeset_ensure_queue_entry: 2,
+    reconcile: 2
+  ],
+  plugins: [
+    {Oban.Plugins.Cron,
+     crontab: [
+       {"*/10 * * * *", Steward.Jobs.TerminalProcessSweep},
+       {"* * * * *", Steward.Jobs.ResumeComputing}
+     ]}
+  ]
+
 # The Session gRPC listener (doc 07 §3.1). `identity: :header` trusts the
 # `x-steward-data-plane-id` header and is for local development only; runtime.exs
 # requires TLS and `:cert` in production.

@@ -14,6 +14,11 @@ defmodule Steward.Application do
         {DNSCluster, query: Application.get_env(:steward, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: Steward.PubSub},
         Steward.Coordinator,
+        {Oban,
+         AshOban.config(
+           Application.fetch_env!(:steward, :ash_domains),
+           Application.fetch_env!(:steward, Oban)
+         )},
         # Start a worker by calling: Steward.Worker.start_link(arg)
         # {Steward.Worker, arg},
         # Start to serve requests, typically the last entry

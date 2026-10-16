@@ -42,3 +42,6 @@ config :steward, Steward.Coordinator, boot_sweep: false, heartbeat_flush_ms: :in
 
 # Tests start their own Session listener on a free port.
 config :steward, StewardWeb.Plane, start_server: false, identity: :header
+
+# Jobs run only when a test drains them (`AshOban.Test`, `Oban.Testing`).
+config :steward, Oban, testing: :manual
