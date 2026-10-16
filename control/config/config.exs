@@ -20,6 +20,8 @@ config :steward,
   ],
   generators: [timestamp_type: :utc_datetime]
 
+config :steward, Steward.Repo, types: Steward.PostgrexTypes
+
 # Configure the endpoint
 config :steward, StewardWeb.Endpoint,
   url: [host: "localhost"],
